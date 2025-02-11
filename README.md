@@ -338,7 +338,7 @@ To protect/unprotect a branch run `git s3 protect <remote> <branch-name>` respec
 
 Bundles are stored in the S3 bucket as `<prefix>/<ref>/<sha>.bundle`.
 
-When listing remote ref (eg explicitly via `git ls-remote`) we list all the keys present under the given <prefix>.
+When listing remote ref (eg explicitly via `git ls-remote`) we list all the keys present under the given `<prefix>`.
 
 When pushing a new ref (eg a commit), we get the sha of the ref, we bundle the ref via `git bundle create <sha>.bundle <ref>` and store it to S3 according the schema above.
 
