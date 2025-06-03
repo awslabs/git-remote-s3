@@ -655,3 +655,26 @@ def test_cmd_push_delete_fails_with_multiple_heads_s3_zip(session_client_mock):
     res = s3_remote.cmd_push(f"push :refs/heads/{BRANCH}")
     assert session_client_mock.return_value.delete_object.call_count == 0
     assert res.startswith("error")
+
+
+@patch("git_remote_s3.git.unbundle")
+@patch("boto3.Session.client")
+def test_cmd_fetch_batch(session_client_mock, unbundle_mock):
+
+    s3_remote = S3Remote(UriScheme.S3, None, "test_bucket", "test_prefix")
+
+    session_client_mock.return_value.get_object.return_value = {
+        "Body": BytesIO(MOCK_BUNDLE_CONTENT)
+    }
+
+    batch_input = (
+        f"{SHA1} refs/heads/{BRANCH}\n"
+        f"{SHA2} refs/tags/v1\n"
+        "\n"
+    )
+
+    with patch("sys.stdin", new=StringIO(batch_input)):
+        s3_remote.cmd_fetch("fetch --stdin")
+
+    assert unbundle_mock.call_count == 2
+    assert session_client_mock.return_value.get_object.call_count == 2

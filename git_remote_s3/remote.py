@@ -16,10 +16,14 @@ from botocore.exceptions import (
 import re
 import tempfile
 import os
+import concurrent.futures
+import shutil
+import subprocess
 from git_remote_s3 import git
 from .enums import UriScheme
 from .common import parse_git_url
 import botocore
+import threading
 
 logger = logging.getLogger(__name__)
 if "remote" in __name__:
@@ -70,6 +74,7 @@ class S3Remote:
         self.mode = None
         self.fetched_refs = []
         self.push_cmds = []
+        self._fetched_refs_lock = threading.Lock()
 
     def list_refs(self, *, bucket: str, prefix: str) -> list:
         res = self.s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
@@ -93,15 +98,13 @@ class S3Remote:
         ]
         return objs
 
-    def cmd_fetch(self, args: str):
-        sha, ref = args.split(" ")[1:]
-        if sha in self.fetched_refs:
-            return
-        logger.info(f"fetch {sha} {ref}")
+    def _fetch_one(self, sha, ref):
+        """Download <sha>.bundle for <ref>, return path to temp file (or None)."""
+        key = f"{self.prefix}/{ref}/{sha}.bundle"
         try:
             temp_dir = tempfile.mkdtemp(prefix="git_remote_s3_fetch_")
             obj = self.s3.get_object(
-                Bucket=self.bucket, Key=f"{self.prefix}/{ref}/{sha}.bundle"
+                Bucket=self.bucket, Key=key
             )
             data = obj["Body"].read()
 
@@ -109,15 +112,71 @@ class S3Remote:
                 f.write(data)
             logger.info(f"fetched {temp_dir}/{sha}.bundle {ref}")
 
-            git.unbundle(folder=temp_dir, sha=sha, ref=ref)
-            self.fetched_refs.append(sha)
+            return temp_dir, sha, ref
+
+        except self.s3.exceptions.NoSuchKey:
+            logger.warning(f"{key} not found")
         except ClientError as e:
             if e.response["Error"]["Code"] == "AccessDenied":
                 raise NotAuthorizedError("GetObject", self.bucket)
             raise e
+
+        return None
+
+    def _unbundle(self, folder, sha, ref):
+        """Stream bundle into git and delete the tempfile.
+
+        After the unbundle operation finishes (or raises), the temporary bundle
+        file is removed.
+        """
+
+        try:
+            git.unbundle(folder=folder, sha=sha, ref=ref)
         finally:
-            if os.path.exists(f"{temp_dir}/{sha}.bundle"):
-                os.remove(f"{temp_dir}/{sha}.bundle")
+            if os.path.exists(f"{folder}/{sha}.bundle"):
+                os.remove(f"{folder}/{sha}.bundle")
+
+    def cmd_fetch(self, args: str):
+        """
+        Handles both legacy
+            fetch <sha1> <refname>
+        calls **and** the modern batch form
+            fetch --stdin
+        """
+        # single-ref mode
+        if args.split(" ")[1] != "--stdin":
+            sha, ref = args.split(" ")[1:]
+            with self._fetched_refs_lock:
+                if sha in self.fetched_refs:
+                    return
+            folder, sha, ref = self._fetch_one(sha, ref)
+            if folder and sha:
+                self._unbundle(folder, sha, ref)
+                with self._fetched_refs_lock:
+                    self.fetched_refs.append(sha)
+            return
+
+        # batch mode
+        todo: list[tuple[str, str]] = []
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                break
+            sha, ref = line.split()
+            with self._fetched_refs_lock:
+                if sha in self.fetched_refs:
+                    continue
+            todo.append((sha, ref))
+
+        if not todo:
+            return
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, os.cpu_count())) as pool:
+            for folder, sha, ref in pool.map(lambda t: self._fetch_one(*t), todo):
+                if folder and sha:
+                    self._unbundle(folder, sha, ref) 
+                    with self._fetched_refs_lock:
+                        self.fetched_refs.append(sha)
 
     def remove_remote_ref(self, remote_ref: str) -> str:
         logger.info(f"Removing remote ref {remote_ref}")
