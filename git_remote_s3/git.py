@@ -144,3 +144,48 @@ def get_last_commit_message() -> str:
         raise GitError(f"fatal: an error as occurred")
     message = result.stdout.decode("utf8").strip()
     return message
+
+
+def unbundle_stream(stream, *, ref: str, chunk_size: int = 1024 * 1024):
+    """Pipe the bundle bytes from *stream* directly to `git bundle unbundle -`.
+
+    Args:
+        stream: File-like object (e.g. botocore StreamingBody) yielding bytes.
+        ref:    The reference that `git bundle unbundle` should update.
+        chunk_size: Size of chunks read from *stream*; defaults to 1 MiB.
+
+    Raises:
+        GitError: if the underlying git command exits with non-zero status.
+    """
+
+    import subprocess
+    import sys
+
+    proc = subprocess.Popen(
+        ["git", "bundle", "unbundle", "-", ref],
+        stdin=subprocess.PIPE,
+        stdout=sys.stderr,
+    )
+
+    try:
+        if hasattr(stream, "iter_chunks"):
+            for chunk in stream.iter_chunks(chunk_size):
+                if not chunk:
+                    break
+                proc.stdin.write(chunk)
+        else:
+            while True:
+                chunk = stream.read(chunk_size)
+                if not chunk:
+                    break
+                proc.stdin.write(chunk)
+    finally:
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
+
+    proc.wait()
+
+    if proc.returncode != 0:
+        raise GitError(f"git bundle unbundle failed (exit code {proc.returncode})")

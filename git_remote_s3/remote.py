@@ -98,21 +98,33 @@ class S3Remote:
         ]
         return objs
 
-    def _fetch_one(self, sha, ref):
-        """Download <sha>.bundle for <ref>, return path to temp file (or None)."""
+    def _fetch_one_stream(self, sha: str, ref: str):
+        """Stream the bundle for <sha> / <ref> directly into git."""
+
+        with self._fetched_refs_lock:
+            if sha in self.fetched_refs:
+                return None
+
         key = f"{self.prefix}/{ref}/{sha}.bundle"
+        logger.info(f"fetch {sha} {ref}")
+
         try:
             temp_dir = tempfile.mkdtemp(prefix="git_remote_s3_fetch_")
-            obj = self.s3.get_object(
-                Bucket=self.bucket, Key=key
-            )
+            obj = self.s3.get_object(Bucket=self.bucket, Key=key)
             data = obj["Body"].read()
 
             with open(f"{temp_dir}/{sha}.bundle", "wb") as f:
                 f.write(data)
-            logger.info(f"fetched {temp_dir}/{sha}.bundle {ref}")
 
-            return temp_dir, sha, ref
+            git.unbundle(folder=temp_dir, sha=sha, ref=ref)
+
+            with self._fetched_refs_lock:
+                self.fetched_refs.append(sha)
+
+            try:
+                obj["Body"].close()
+            except Exception:
+                pass
 
         except self.s3.exceptions.NoSuchKey:
             logger.warning(f"{key} not found")
@@ -120,8 +132,11 @@ class S3Remote:
             if e.response["Error"]["Code"] == "AccessDenied":
                 raise NotAuthorizedError("GetObject", self.bucket)
             raise e
+        finally:
+            if os.path.exists(f"{temp_dir}/{sha}.bundle"):
+                os.remove(f"{temp_dir}/{sha}.bundle")
 
-        return None
+        return sha
 
     def _unbundle(self, folder, sha, ref):
         """Stream bundle into git and delete the tempfile.
@@ -146,14 +161,36 @@ class S3Remote:
         # single-ref mode
         if args.split(" ")[1] != "--stdin":
             sha, ref = args.split(" ")[1:]
+            
             with self._fetched_refs_lock:
                 if sha in self.fetched_refs:
                     return
-            folder, sha, ref = self._fetch_one(sha, ref)
-            if folder and sha:
-                self._unbundle(folder, sha, ref)
+
+            key = f"{self.prefix}/{ref}/{sha}.bundle"
+            try:
+                temp_dir = tempfile.mkdtemp(prefix="git_remote_s3_fetch_")
+                obj = self.s3.get_object(
+                    Bucket=self.bucket, Key=key
+                )
+                data = obj["Body"].read()
+
+                with open(f"{temp_dir}/{sha}.bundle", "wb") as f:
+                    f.write(data)
+                logger.info(f"fetched {temp_dir}/{sha}.bundle {ref}")
+                git.unbundle(folder=temp_dir, sha=sha, ref=ref)
+                
                 with self._fetched_refs_lock:
                     self.fetched_refs.append(sha)
+
+            except self.s3.exceptions.NoSuchKey:
+                logger.warning(f"{key} not found")
+            except ClientError as e:
+                if e.response["Error"]["Code"] == "AccessDenied":
+                    raise NotAuthorizedError("GetObject", self.bucket)
+                raise e
+            finally:
+                if os.path.exists(f"{temp_dir}/{sha}.bundle"):
+                    os.remove(f"{temp_dir}/{sha}.bundle")
             return
 
         # batch mode
@@ -172,11 +209,7 @@ class S3Remote:
             return
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, os.cpu_count())) as pool:
-            for folder, sha, ref in pool.map(lambda t: self._fetch_one(*t), todo):
-                if folder and sha:
-                    self._unbundle(folder, sha, ref) 
-                    with self._fetched_refs_lock:
-                        self.fetched_refs.append(sha)
+            pool.map(lambda t: self._fetch_one_stream(*t), todo)
 
     def remove_remote_ref(self, remote_ref: str) -> str:
         logger.info(f"Removing remote ref {remote_ref}")
@@ -465,4 +498,6 @@ def main():
             f"fatal: unknown error. Run with --verbose flag to get full log\n"
         )
         sys.stderr.flush()
+        sys.exit(1)
+
         sys.exit(1)
