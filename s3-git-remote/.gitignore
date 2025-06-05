@@ -1,9 +1,3 @@
-*.pyc
-.venv
-.mypy_cache
-__pychache__
-*.tar.gz
-.DS_Store
 # Ignore Gradle project-specific cache directory
 .gradle
 
