@@ -355,7 +355,19 @@ If an object with the same key already exists, git-lfs-s3 does not upload it aga
 
 ### Debugging
 
-Use `--verbose` flag to print some debug information when performing git operations. Logs will be put to stderr.
+Use `--verbose` flag or set `transfer.verbosity=2` to print debug information when performing git operations:
+
+```bash
+git -c transfer.verbosity=2 push origin main
+```
+
+For early errors (like credential issues), use the environment variable:
+
+```bash
+GIT_REMOTE_S3_VERBOSE=1 git push origin main
+```
+
+Logs will be put to stderr.
 
 For LFS operations you can enable and disable debug logging via `git-lfs-s3 enable-debug` and `git-lfs-s3 disable-debug` respectively. Logs are put in `.git/lfs/tmp/git-lfs-s3.log` in the repo.
 

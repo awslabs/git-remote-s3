@@ -25,7 +25,11 @@ import botocore
 
 logger = logging.getLogger(__name__)
 if "remote" in __name__:
-    logging.basicConfig(level=logging.ERROR, stream=sys.stderr)
+    # Check for early verbosity via environment variable
+    verbose_env = os.environ.get('GIT_REMOTE_S3_VERBOSE', '').lower() in ('1', 'true', 'yes')
+    log_level = logging.INFO if verbose_env else logging.ERROR
+    logging.basicConfig(level=log_level, stream=sys.stderr,
+                        format='%(name)s: %(levelname)s: %(message)s')
 
 
 class BucketNotFoundError(Exception):
@@ -264,6 +268,8 @@ class S3Remote:
     def cmd_option(self, arg: str):
         option, value = arg.split(" ")[1:]
         if option == "verbosity" and int(value) >= 2:
+            # Set both root logger and module logger for complete verbosity
+            logging.getLogger().setLevel(logging.INFO)
             logger.setLevel(logging.INFO)
             sys.stdout.write("ok\n")
         else:
