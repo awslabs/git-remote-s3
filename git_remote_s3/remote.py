@@ -17,15 +17,136 @@ import re
 import tempfile
 import os
 import concurrent.futures
+import math
 from threading import Lock
 from git_remote_s3 import git
 from .enums import UriScheme
 from .common import parse_git_url
 import botocore
 
+# Constants for multipart upload configuration
+DEFAULT_PART_SIZE = 100 * 1024 * 1024  # 100MB
+MULTIPART_UPLOAD_THRESHOLD = 2 * 1024 * 1024 * 1024  # 2GB
+
 logger = logging.getLogger(__name__)
 if "remote" in __name__:
     logging.basicConfig(level=logging.ERROR, stream=sys.stderr)
+
+
+def get_file_size(file_path):
+    """Get the size of a file in bytes."""
+    try:
+        return os.path.getsize(file_path)
+    except (OSError, IOError) as e:
+        logger.error(f"Error getting file size: {e}")
+        return 0
+
+
+def should_use_multipart_upload(file_path):
+    """Determine if a file should use multipart upload based on its size."""
+    file_size = get_file_size(file_path)
+    logger.info(f"File size: {file_size} bytes, threshold: {MULTIPART_UPLOAD_THRESHOLD} bytes")
+    return file_size > MULTIPART_UPLOAD_THRESHOLD
+
+
+def multipart_upload_file(s3_client, file_path, bucket, key, metadata=None):
+    """
+    Upload a file to S3 using multipart upload for large files.
+    
+    Args:
+        s3_client: boto3 S3 client
+        file_path: Path to the file to upload
+        bucket: S3 bucket name
+        key: S3 object key
+        metadata: Optional metadata dictionary
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    file_size = get_file_size(file_path)
+    
+    if file_size == 0:
+        logger.error(f"File {file_path} is empty or cannot be read")
+        return False
+    
+    try:
+        # Step 1: Initialize multipart upload
+        logger.info(f"Starting multipart upload for {file_path} to {bucket}/{key}")
+        
+        # Prepare upload parameters
+        mpu_kwargs = {
+            'Bucket': bucket,
+            'Key': key,
+        }
+        
+        if metadata:
+            mpu_kwargs['Metadata'] = metadata
+        
+        # Create the multipart upload
+        mpu = s3_client.create_multipart_upload(**mpu_kwargs)
+        upload_id = mpu['UploadId']
+        
+        # Step 2: Upload parts
+        parts = []
+        part_number = 1
+        part_size = DEFAULT_PART_SIZE
+        
+        # Calculate number of parts needed
+        total_parts = math.ceil(file_size / part_size)
+        logger.info(f"File will be uploaded in {total_parts} parts of {part_size} bytes each")
+        
+        try:
+            with open(file_path, 'rb') as file_data:
+                while True:
+                    # Read the next chunk from the file
+                    data = file_data.read(part_size)
+                    if not data:
+                        break
+                    
+                    # Upload the part
+                    logger.info(f"Uploading part {part_number}/{total_parts}")
+                    part = s3_client.upload_part(
+                        Body=data,
+                        Bucket=bucket,
+                        Key=key,
+                        UploadId=upload_id,
+                        PartNumber=part_number
+                    )
+                    
+                    # Add the part to our list of parts
+                    parts.append({
+                        'PartNumber': part_number,
+                        'ETag': part['ETag']
+                    })
+                    
+                    part_number += 1
+            
+            # Step 3: Complete the multipart upload
+            logger.info(f"Completing multipart upload for {key}")
+            s3_client.complete_multipart_upload(
+                Bucket=bucket,
+                Key=key,
+                UploadId=upload_id,
+                MultipartUpload={'Parts': parts}
+            )
+            
+            logger.info(f"Multipart upload completed successfully for {key}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error during multipart upload: {e}")
+            # Abort the multipart upload if there was an error
+            s3_client.abort_multipart_upload(
+                Bucket=bucket,
+                Key=key,
+                UploadId=upload_id
+            )
+            logger.info(f"Multipart upload aborted for {key}")
+            raise
+            
+    except Exception as e:
+        logger.error(f"Failed to upload {file_path} to {bucket}/{key}: {e}")
+        return False
 
 
 class BucketNotFoundError(Exception):
@@ -176,15 +297,34 @@ class S3Remote:
                     return f'error {remote_ref} "remote ref is not ancestor of {local_ref}."?\n'
 
             temp_file = git.bundle(folder=temp_dir, sha=sha, ref=local_ref)
-
-            with open(temp_file, "rb") as f:
-                self.s3.put_object(
-                    Bucket=self.bucket,
-                    Key=f"{self.prefix}/{remote_ref}/{sha}.bundle",
-                    Body=f,
+            bundle_key = f"{self.prefix}/{remote_ref}/{sha}.bundle"
+            
+            # Check if we should use multipart upload for the bundle
+            if should_use_multipart_upload(temp_file):
+                logger.info(f"Using multipart upload for large bundle file: {temp_file}")
+                
+                # Perform multipart upload
+                success = multipart_upload_file(
+                    self.s3,
+                    temp_file,
+                    self.bucket,
+                    bundle_key
                 )
+                
+                if not success:
+                    return f'error {remote_ref} "Failed to upload bundle using multipart upload"?\n'
+            else:
+                # Use standard upload for smaller files
+                with open(temp_file, "rb") as f:
+                    self.s3.put_object(
+                        Bucket=self.bucket,
+                        Key=bundle_key,
+                        Body=f,
+                    )
+                    
             self.init_remote_head(remote_ref)
             logger.info(f"pushed {temp_file} to {remote_ref}")
+            
             if remote_to_remove:
                 self.s3.delete_object(Bucket=self.bucket, Key=remote_to_remove)
 
@@ -193,14 +333,35 @@ class S3Remote:
                 # Example use-case: Repo on S3 as Source for AWS CodePipeline
                 commit_msg = git.get_last_commit_message()
                 temp_file_archive = git.archive(folder=temp_dir, ref=local_ref)
-                with open(temp_file_archive, "rb") as f:
-                    self.s3.put_object(
-                        Bucket=self.bucket,
-                        Key=f"{self.prefix}/{remote_ref}/repo.zip",
-                        Body=f,
-                        Metadata={"codepipeline-artifact-revision-summary": commit_msg},
-                        ContentDisposition=f"attachment; filename=repo-{sha[:8]}.zip",
+                archive_key = f"{self.prefix}/{remote_ref}/repo.zip"
+                metadata = {"codepipeline-artifact-revision-summary": commit_msg}
+                
+                # Check if we should use multipart upload for the archive
+                if should_use_multipart_upload(temp_file_archive):
+                    logger.info(f"Using multipart upload for large archive file: {temp_file_archive}")
+                    
+                    # Perform multipart upload with metadata
+                    success = multipart_upload_file(
+                        self.s3,
+                        temp_file_archive,
+                        self.bucket,
+                        archive_key,
+                        metadata=metadata
                     )
+                    
+                    if not success:
+                        return f'error {remote_ref} "Failed to upload archive using multipart upload"?\n'
+                else:
+                    # Use standard upload for smaller files
+                    with open(temp_file_archive, "rb") as f:
+                        self.s3.put_object(
+                            Bucket=self.bucket,
+                            Key=archive_key,
+                            Body=f,
+                            Metadata=metadata,
+                            ContentDisposition=f"attachment; filename=repo-{sha[:8]}.zip",
+                        )
+                
                 logger.info(
                     f"pushed {temp_file_archive} to {self.prefix}/{remote_ref}/repo.zip with message {commit_msg}"
                 )
