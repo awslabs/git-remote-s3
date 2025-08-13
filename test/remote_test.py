@@ -6,6 +6,8 @@ from botocore.exceptions import ClientError
 import tempfile
 import datetime
 import botocore
+import threading
+from io import BytesIO
 
 SHA1 = "c105d19ba64965d2c9d3d3246e7269059ef8bb8a"
 SHA2 = "c105d19ba64965d2c9d3d3246e7269059ef8bb8b"
@@ -662,3 +664,87 @@ def test_cmd_push_delete_fails_with_multiple_heads_s3_zip(session_client_mock):
     res = s3_remote.cmd_push(f"push :refs/heads/{BRANCH}")
     assert session_client_mock.return_value.delete_object.call_count == 0
     assert res.startswith("error")
+
+
+@patch("git_remote_s3.git.bundle")
+@patch("git_remote_s3.git.rev_parse")
+@patch("boto3.Session.client")
+def test_simultaneous_pushes_single_bundle_remains(
+    session_client_mock, rev_parse_mock, bundle_mock
+):
+    s3_remote = S3Remote(UriScheme.S3, None, "test_bucket", "test_prefix")
+
+    storage = {}
+    lock_keys = []
+    storage_lock = threading.Lock()
+
+    def list_objects_v2_side_effect(Bucket, Prefix, **kwargs):
+        with storage_lock:
+            if Prefix.endswith("/LOCKS/"):
+                contents = [{"Key": k, "LastModified": datetime.datetime.now()} for k in lock_keys]
+            else:
+                contents = [
+                    {"Key": k, "LastModified": datetime.datetime.now()}
+                    for k in storage.keys()
+                    if k.startswith(Prefix)
+                ]
+        return {"Contents": contents, "NextContinuationToken": None}
+
+    def put_object_side_effect(Bucket, Key, Body=None, **kwargs):
+        with storage_lock:
+            if Key.endswith(".lock"):
+                lock_keys.append(Key)
+            else:
+                data = Body.read() if hasattr(Body, "read") else Body or b""
+                storage[Key] = data
+        return {}
+
+    def delete_object_side_effect(Bucket, Key):
+        with storage_lock:
+            storage.pop(Key, None)
+            try:
+                lock_keys.remove(Key)
+            except ValueError:
+                pass
+        return {}
+
+    session_client_mock.return_value.list_objects_v2.side_effect = list_objects_v2_side_effect
+    session_client_mock.return_value.put_object.side_effect = put_object_side_effect
+    session_client_mock.return_value.delete_object.side_effect = delete_object_side_effect
+
+    def rev_parse_side_effect(local_ref: str):
+        return SHA1 if "branch1" in local_ref else SHA2
+
+    rev_parse_mock.side_effect = rev_parse_side_effect
+
+    def bundle_side_effect(folder: str, sha: str, ref: str):
+        temp_file = tempfile.NamedTemporaryFile(dir=folder, suffix=BUNDLE_SUFFIX, delete=False)
+        with open(temp_file.name, "wb") as f:
+            f.write(MOCK_BUNDLE_CONTENT)
+        return temp_file.name
+
+    bundle_mock.side_effect = bundle_side_effect
+
+    remote_ref = f"refs/heads/{BRANCH}"
+
+    t1 = threading.Thread(
+        target=s3_remote.cmd_push, args=(f"push refs/heads/branch1:{remote_ref}",)
+    )
+    t2 = threading.Thread(
+        target=s3_remote.cmd_push, args=(f"push refs/heads/branch2:{remote_ref}",)
+    )
+
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    with storage_lock:
+        bundles = [
+            k
+            for k in storage.keys()
+            if k.startswith(f"test_prefix/{remote_ref}/") and k.endswith(".bundle")
+        ]
+
+    assert len(bundles) == 1
+    assert bundles[0].endswith(f"/{SHA1}.bundle") or bundles[0].endswith(f"/{SHA2}.bundle")

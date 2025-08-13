@@ -224,16 +224,34 @@ class S3Remote:
             if not lock_key:
                 return f'error {remote_ref} "failed to acquire ref lock. Please retry."?\n'
 
+            # Check if the remote state between first check and lock acquisition
+            # If remote has changed, then we reject like a stale non-fast-forward
+            # Otherwise, we proceed with pushing the new bundle 
+            current_contents = self.get_bundles_for_ref(remote_ref)
+            if len(current_contents) > 1:
+                return f'error {remote_ref} "multiple bundles exists on server. Run git-s3 doctor to fix."?\n'
+            current_remote_to_remove = (
+                current_contents[0]["Key"] if len(current_contents) == 1 else None
+            )
+            if (
+                remote_to_remove is not None
+                and current_remote_to_remove is not None
+                and current_remote_to_remove != remote_to_remove
+            ):
+                return f'error {remote_ref} "stale remote. Please fetch and retry."?\n'
+
             with open(temp_file, "rb") as f:
                 self.s3.put_object(
                     Bucket=self.bucket,
                     Key=f"{self.prefix}/{remote_ref}/{sha}.bundle",
                     Body=f,
                 )
+
             self.init_remote_head(remote_ref)
             logger.info(f"pushed {temp_file} to {remote_ref}")
-            if remote_to_remove:
-                self.s3.delete_object(Bucket=self.bucket, Key=remote_to_remove)
+            # Remove the bundle that was present at the time of lock acquisition
+            if current_remote_to_remove:
+                self.s3.delete_object(Bucket=self.bucket, Key=current_remote_to_remove)
 
             if self.uri_scheme == UriScheme.S3_ZIP:
                 # Create and push a zip archive next to the bundle file
@@ -269,6 +287,7 @@ class S3Remote:
                     self.release_lock(remote_ref, lock_key)
                 except Exception:
                     logger.info(f"failed to release lock {lock_key} for {remote_ref}")
+            # Clean up temp bundle that might've been written but never got pushed
             if sha and os.path.exists(f"{temp_dir}/{sha}.bundle"):
                 os.remove(f"{temp_dir}/{sha}.bundle")
 
@@ -305,7 +324,10 @@ class S3Remote:
             for c in self.s3.list_objects_v2(
                 Bucket=self.bucket, Prefix=f"{self.prefix}/{remote_ref}/"
             ).get("Contents", [])
-            if "PROTECTED#" not in c["Key"] and ".zip" not in c["Key"]
+            if "PROTECTED#" not in c["Key"]
+            and ".zip" not in c["Key"]
+            and "/LOCKS/" not in c["Key"]
+            and not c["Key"].endswith(".lock")
         ]
 
     def is_protected(self, remote_ref):
@@ -315,10 +337,11 @@ class S3Remote:
         return protected
 
     def acquire_lock(self, remote_ref: str) -> Optional[str]:
-        """Best-effort distributed lock for the given ref using S3 objects.
+        """Best-effort distributed lock for given ref using S3 objects.
 
-        Creates a unique lock object under <prefix>/<ref>/LOCKS/ and wins if its
-        key is the lexicographically-smallest among current lock objects.
+        Creates a unique lock object under <prefix>/<ref>/LOCKS/.
+        If there concurrent acquires, the lock is acquired by the lock with the
+        lexicographically-smallest key.
 
         Returns the lock key if acquired, or None otherwise.
         """
