@@ -221,8 +221,10 @@ def test_cmd_push_no_force_unprotected_ancestor(
     is_ancestor_mock.return_value = True
     assert s3_remote.s3 == session_client_mock.return_value
     res = s3_remote.cmd_push(f"push refs/heads/{BRANCH}:refs/heads/{BRANCH}")
-    assert session_client_mock.return_value.put_object.call_count == 1
-    assert session_client_mock.return_value.delete_object.call_count == 1
+    put_calls = [c for c in session_client_mock.return_value.put_object.call_args_list if not c.kwargs["Key"].endswith(".lock")]
+    assert len(put_calls) == 1
+    del_calls = [c for c in session_client_mock.return_value.delete_object.call_args_list if not c.kwargs["Key"].endswith(".lock")]
+    assert len(del_calls) == 1
     assert res == (f"ok refs/heads/{BRANCH}\n")
 
 
@@ -257,8 +259,10 @@ def test_cmd_push_no_force_unprotected_ancestor_s3_zip(
     assert s3_remote.s3 == session_client_mock.return_value
 
     res = s3_remote.cmd_push(f"push refs/heads/{BRANCH}:refs/heads/{BRANCH}")
-    assert session_client_mock.return_value.put_object.call_count == 2
-    assert session_client_mock.return_value.delete_object.call_count == 1
+    put_calls = [c for c in session_client_mock.return_value.put_object.call_args_list if not c.kwargs["Key"].endswith(".lock")]
+    assert len(put_calls) == 2
+    del_calls = [c for c in session_client_mock.return_value.delete_object.call_args_list if not c.kwargs["Key"].endswith(".lock")]
+    assert len(del_calls) == 1
     assert res == (f"ok refs/heads/{BRANCH}\n")
 
 
@@ -283,7 +287,8 @@ def test_cmd_push_no_force_unprotected_no_ancestor(
     is_ancestor_mock.return_value = False
     assert s3_remote.s3 == session_client_mock.return_value
     res = s3_remote.cmd_push(f"push refs/heads/{BRANCH}:refs/heads/{BRANCH}")
-    assert session_client_mock.return_value.put_object.call_count == 0
+    put_calls = [c for c in session_client_mock.return_value.put_object.call_args_list if not c.kwargs.get("Key", "").endswith(".lock")]
+    assert len(put_calls) == 0
     assert session_client_mock.return_value.delete_object.call_count == 0
     assert res.startswith("error")
 
@@ -308,8 +313,10 @@ def test_cmd_push_force_no_ancestor(
     is_ancestor_mock.return_value = False
     assert s3_remote.s3 == session_client_mock.return_value
     res = s3_remote.cmd_push(f"push +refs/heads/{BRANCH}:refs/heads/{BRANCH}")
-    assert session_client_mock.return_value.put_object.call_count == 1
-    assert session_client_mock.return_value.delete_object.call_count == 1
+    put_calls = [c for c in session_client_mock.return_value.put_object.call_args_list if not c.kwargs["Key"].endswith(".lock")]
+    assert len(put_calls) == 1
+    del_calls = [c for c in session_client_mock.return_value.delete_object.call_args_list if not c.kwargs["Key"].endswith(".lock")]
+    assert len(del_calls) == 1
     assert res.startswith("ok")
 
 
@@ -345,8 +352,10 @@ def test_cmd_push_force_no_ancestor_s3_zip(
     assert s3_remote.s3 == session_client_mock.return_value
 
     res = s3_remote.cmd_push(f"push +refs/heads/{BRANCH}:refs/heads/{BRANCH}")
-    assert session_client_mock.return_value.put_object.call_count == 2
-    assert session_client_mock.return_value.delete_object.call_count == 1
+    put_calls = [c for c in session_client_mock.return_value.put_object.call_args_list if not c.kwargs["Key"].endswith(".lock")]
+    assert len(put_calls) == 2
+    del_calls = [c for c in session_client_mock.return_value.delete_object.call_args_list if not c.kwargs["Key"].endswith(".lock")]
+    assert len(del_calls) == 1
     assert res.startswith("ok")
 
 
@@ -397,8 +406,10 @@ def test_cmd_push_empty_bucket(
     is_ancestor_mock.return_value = False
     assert s3_remote.s3 == session_client_mock.return_value
     res = s3_remote.cmd_push(f"push refs/heads/{BRANCH}:refs/heads/{BRANCH}")
-    assert session_client_mock.return_value.put_object.call_count == 2
-    assert session_client_mock.return_value.delete_object.call_count == 0
+    put_calls = [c for c in session_client_mock.return_value.put_object.call_args_list if not c.kwargs["Key"].endswith(".lock")]
+    assert len(put_calls) == 2
+    del_calls = [c for c in session_client_mock.return_value.delete_object.call_args_list if not c.kwargs["Key"].endswith(".lock")]
+    assert len(del_calls) == 0
     assert res.startswith("ok")
 
 
@@ -438,8 +449,10 @@ def test_cmd_push_empty_bucket_s3_zip(
     assert s3_remote.s3 == session_client_mock.return_value
 
     res = s3_remote.cmd_push(f"push refs/heads/{BRANCH}:refs/heads/{BRANCH}")
-    assert session_client_mock.return_value.put_object.call_count == 3
-    assert session_client_mock.return_value.delete_object.call_count == 0
+    put_calls = [c for c in session_client_mock.return_value.put_object.call_args_list if not c.kwargs["Key"].endswith(".lock")]
+    assert len(put_calls) == 3
+    del_calls = [c for c in session_client_mock.return_value.delete_object.call_args_list if not c.kwargs["Key"].endswith(".lock")]
+    assert len(del_calls) == 0
     assert res.startswith("ok")
 
 
@@ -480,7 +493,7 @@ def test_cmd_push_s3_zip_put_object_params(
 
     s3_remote.cmd_push(f"push refs/heads/{BRANCH}:refs/heads/{BRANCH}")
 
-    put_object_calls = session_client_mock.return_value.put_object.call_args_list
+    put_object_calls = [c for c in session_client_mock.return_value.put_object.call_args_list if not c.kwargs["Key"].endswith(".lock")]
     assert len(put_object_calls) == 2
 
     # Check bundle upload
