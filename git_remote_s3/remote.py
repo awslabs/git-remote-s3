@@ -91,6 +91,11 @@ class S3Remote:
         self.fetched_refs_lock = Lock()  # Lock for thread-safe access to fetched_refs
         self.push_cmds = []
         self.fetch_cmds = []  # Store fetch commands for batch processing
+        # Lock TTL (seconds); can be configured via env var
+        try:
+            self.lock_ttl_seconds = int(os.environ.get("GIT_REMOTE_S3_LOCK_TTL", "60"))
+        except ValueError:
+            self.lock_ttl_seconds = 60
 
     def list_refs(self, *, bucket: str, prefix: str) -> list:
         res = self.s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
@@ -366,7 +371,29 @@ class S3Remote:
                     "412",
                 ]
             ):
-                return None
+                # Check if the existing lock is stale; if so, try to clear and acquire
+                try:
+                    head = self.s3.head_object(Bucket=self.bucket, Key=lock_key)
+                    last_modified = head.get("LastModified")
+                    if last_modified is not None:
+                        import datetime
+
+                        now = datetime.datetime.now(tz=last_modified.tzinfo)
+                        age = (now - last_modified).total_seconds()
+                        if age > self.lock_ttl_seconds:
+                            # Attempt to delete stale lock and re-acquire
+                            self.s3.delete_object(Bucket=self.bucket, Key=lock_key)
+                            # Retry conditional put
+                            self.s3.put_object(
+                                Bucket=self.bucket,
+                                Key=lock_key,
+                                Body=b"",
+                                IfNoneMatch="*",
+                            )
+                            return lock_key
+                except botocore.exceptions.ClientError as e:
+                    logger.info(f"failed to check staleness of {lock_key} for {remote_ref}: {e}")
+                    raise e
             raise
 
     def release_lock(self, remote_ref: str, lock_key: str) -> None:

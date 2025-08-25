@@ -15,14 +15,24 @@ from botocore.exceptions import (
     UnknownCredentialError,
 )
 from .git import get_remote_url, GitError
+import datetime
+
+
+def _parse_ttl_seconds(value: str) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return 60
 
 
 class Doctor:
-    def __init__(self, profile, bucket, prefix, delete_bundle) -> None:
+    def __init__(self, profile, bucket, prefix, delete_bundle, lock_ttl_seconds=60, delete_stale_locks=False) -> None:
         self.bucket = bucket
         self.prefix = prefix
         self.delete_bundle = delete_bundle
         self.s3 = boto3.Session(profile_name=profile).client("s3")
+        self.lock_ttl_seconds = lock_ttl_seconds
+        self.delete_stale_locks = delete_stale_locks
 
     def run(self):
         repos = self.analyze_repo()
@@ -50,6 +60,45 @@ class Doctor:
 
             if repos[r]["HEAD"] == "Invalid":
                 self.fix_head(repos, r)
+
+        # After fixing references, scan and handle stale locks
+        self.list_and_handle_stale_locks()
+
+    def list_and_handle_stale_locks(self):
+        print("\nScanning for stale locks...")
+        objs = self.s3.list_objects_v2(
+            Bucket=self.bucket, Prefix=self.prefix + "/"
+        ).get("Contents", [])
+
+        now = datetime.datetime.now(tz=datetime.timezone.utc)
+        stale = []
+        for o in objs:
+            key = o["Key"]
+            if key.endswith(".lock"):
+                last_modified = o.get("LastModified")
+                if last_modified is not None:
+                    age = (now - last_modified).total_seconds()
+                    if age > self.lock_ttl_seconds:
+                        stale.append((key, int(age)))
+
+        if not stale:
+            print("No stale locks found.")
+            return
+
+        print("Found stale locks:")
+        for key, age in stale:
+            print(f" - {key} (age: {age}s)")
+
+        if self.delete_stale_locks:
+            print("\nDeleting stale locks...")
+            for key, _ in stale:
+                try:
+                    self.s3.delete_object(Bucket=self.bucket, Key=key)
+                    print(f"Deleted {key}")
+                except ClientError as e:
+                    print(f"Failed to delete {key}: {e}")
+        else:
+            print("\nRun with --delete-stale-locks to remove them automatically.")
 
     def analyze_repo(self):
         objs = self.s3.list_objects_v2(
@@ -206,6 +255,17 @@ def main():
         help="Delete the bundle instead of creating a new branch",
     )
     parser.add_argument(
+        "--lock-ttl",
+        type=_parse_ttl_seconds,
+        default=60,
+        help="Seconds after which a lock is considered stale (default: 60)",
+    )
+    parser.add_argument(
+        "--delete-stale-locks",
+        action="store_true",
+        help="Delete stale lock files found during doctor run",
+    )
+    parser.add_argument(
         "branch",
         type=str,
         action="store",
@@ -223,7 +283,14 @@ def main():
     uri_scheme, profile, bucket, prefix = parse_git_url(remote_url)
     try:
         if args.command == "doctor":
-            doctor = Doctor(profile, bucket, prefix, args.delete_bundle)
+            doctor = Doctor(
+                profile,
+                bucket,
+                prefix,
+                args.delete_bundle,
+                lock_ttl_seconds=args.lock_ttl,
+                delete_stale_locks=args.delete_stale_locks,
+            )
             doctor.run()
         if (
             args.command == "delete-branch"
