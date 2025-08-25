@@ -692,8 +692,20 @@ def test_simultaneous_pushes_single_bundle_remains(
 
     def put_object_side_effect(Bucket, Key, Body=None, **kwargs):
         with storage_lock:
+            # Simulate S3 conditional writes for lock creation using If-None-Match
             if Key.endswith(".lock"):
-                lock_keys.append(Key)
+                if kwargs.get("IfNoneMatch") == "*":
+                    if Key in lock_keys:
+                        raise botocore.exceptions.ClientError(
+                            {
+                                "ResponseMetadata": {"HTTPStatusCode": 412},
+                                "Error": {"Code": "PreconditionFailed"},
+                            },
+                            "put_object",
+                        )
+                    lock_keys.append(Key)
+                else:
+                    lock_keys.append(Key)
             else:
                 data = Body.read() if hasattr(Body, "read") else Body or b""
                 storage[Key] = data

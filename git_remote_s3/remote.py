@@ -224,12 +224,13 @@ class S3Remote:
             if not lock_key:
                 return f'error {remote_ref} "failed to acquire ref lock. Please retry."?\n'
 
-            # Check if the remote state between first check and lock acquisition
-            # If remote has changed, then we reject like a stale non-fast-forward
-            # Otherwise, we proceed with pushing the new bundle 
+            # Check if the remote ref state changed between first check and lock acquisition
+            # If remote has multiple bundles for the ref, then reject push and notify client(s)
+            # to upgrade to new locking behavior
+            # Otherwise, proceed with pushing the new bundle 
             current_contents = self.get_bundles_for_ref(remote_ref)
             if len(current_contents) > 1:
-                return f'error {remote_ref} "multiple bundles exists on server. Run git-s3 doctor to fix."?\n'
+                return f'error {remote_ref} "multiple bundles exists for the same ref on server. Run git-s3 doctor to fix. Upgrade git-remote-s3 to latest version to prevent this in the future."\n'
             current_remote_to_remove = (
                 current_contents[0]["Key"] if len(current_contents) == 1 else None
             )
@@ -249,8 +250,7 @@ class S3Remote:
 
             self.init_remote_head(remote_ref)
             logger.info(f"pushed {temp_file} to {remote_ref}")
-            # Remove the bundle that was present at the time of lock acquisition
-            if current_remote_to_remove:
+            if remote_to_remove:
                 self.s3.delete_object(Bucket=self.bucket, Key=current_remote_to_remove)
 
             if self.uri_scheme == UriScheme.S3_ZIP:
@@ -285,9 +285,9 @@ class S3Remote:
             if lock_key:
                 try:
                     self.release_lock(remote_ref, lock_key)
-                except Exception:
-                    logger.info(f"failed to release lock {lock_key} for {remote_ref}")
-            # Clean up temp bundle that might've been written but never got pushed
+                except Exception as e:
+                    logger.info(f"failed to release lock {lock_key} for {remote_ref}: {e}")
+                    return f'error {remote_ref} "failed to release lock. You may need to manually remove the lock {lock_key} from the server or use git-s3 doctor to fix."?\n'
             if sha and os.path.exists(f"{temp_dir}/{sha}.bundle"):
                 os.remove(f"{temp_dir}/{sha}.bundle")
 
@@ -337,43 +337,47 @@ class S3Remote:
         return protected
 
     def acquire_lock(self, remote_ref: str) -> Optional[str]:
-        """Best-effort distributed lock for given ref using S3 objects.
+        """Acquire a per-ref lock using S3 conditional writes.
 
-        Creates a unique lock object under <prefix>/<ref>/LOCKS/.
-        If there concurrent acquires, the lock is acquired by the lock with the
-        lexicographically-smallest key.
+        Client attempts to create a single lock object under <prefix>/<ref>/ using
+        S3's HTTP `If-None-Match` conditional header so that only one client can write the
+        lock in case of acquisition races. 
+        Clients that lose the race will get a `412 PreconditionFailed` and should retry later.
 
         Returns the lock key if acquired, or None otherwise.
         """
 
-        lock_id = f"{int(time.time() * 1000)}-{uuid.uuid4().hex}"
-        lock_key = f"{self.prefix}/{remote_ref}/LOCKS/{lock_id}.lock"
-
-        # Create our lock marker
-        self.s3.put_object(Bucket=self.bucket, Key=lock_key, Body=b"")
-
-        # List all lock markers and select the winner deterministically
-        resp = self.s3.list_objects_v2(
-            Bucket=self.bucket, Prefix=f"{self.prefix}/{remote_ref}/LOCKS/"
-        )
-        locks = resp.get("Contents", []) if isinstance(resp, dict) else []
-        if not locks:
-            # In mocked or empty environments, assume lock acquired
-            return lock_key
+        lock_key = f"{self.prefix}/{remote_ref}/LOCK#.lock"
         try:
-            all_lock_keys = sorted([l["Key"] for l in locks])
-        except Exception:
-            all_lock_keys = []
-        if all_lock_keys and all_lock_keys[0] == lock_key:
+            # Use conditional write to create the lock only if it does not exist
+            self.s3.put_object(
+                Bucket=self.bucket,
+                Key=lock_key,
+                Body=b"",
+                IfNoneMatch="*",
+            )
             return lock_key
-
-        # Lost the lock race; remove our marker and signal failure
-        self.s3.delete_object(Bucket=self.bucket, Key=lock_key)
-        return None
+        except botocore.exceptions.ClientError as e:
+            # 412 PreconditionFailed when the lock already exists
+            if (
+                e.response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 412
+                or e.response.get("Error", {}).get("Code") in [
+                    "PreconditionFailed",
+                    "412",
+                ]
+            ):
+                return None
+            raise
 
     def release_lock(self, remote_ref: str, lock_key: str) -> None:
         """Release a previously acquired lock for the given ref."""
-        self.s3.delete_object(Bucket=self.bucket, Key=lock_key)
+        try:
+            self.s3.delete_object(Bucket=self.bucket, Key=lock_key)
+        except botocore.exceptions.ClientError as e:
+            if e.response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 404:
+                logger.info(f"lock {lock_key} already released")
+            else:
+                raise
 
     def cmd_option(self, arg: str):
         option, value = arg.split(" ")[1:]
