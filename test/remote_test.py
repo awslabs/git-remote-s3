@@ -6,6 +6,8 @@ from botocore.exceptions import ClientError
 import tempfile
 import datetime
 import botocore
+import threading
+from io import BytesIO
 
 SHA1 = "c105d19ba64965d2c9d3d3246e7269059ef8bb8a"
 SHA2 = "c105d19ba64965d2c9d3d3246e7269059ef8bb8b"
@@ -221,8 +223,10 @@ def test_cmd_push_no_force_unprotected_ancestor(
     is_ancestor_mock.return_value = True
     assert s3_remote.s3 == session_client_mock.return_value
     res = s3_remote.cmd_push(f"push refs/heads/{BRANCH}:refs/heads/{BRANCH}")
-    assert session_client_mock.return_value.put_object.call_count == 1
-    assert session_client_mock.return_value.delete_object.call_count == 1
+    put_calls = [c for c in session_client_mock.return_value.put_object.call_args_list if not c.kwargs["Key"].endswith(".lock")]
+    assert len(put_calls) == 1
+    del_calls = [c for c in session_client_mock.return_value.delete_object.call_args_list if not c.kwargs["Key"].endswith(".lock")]
+    assert len(del_calls) == 1
     assert res == (f"ok refs/heads/{BRANCH}\n")
 
 
@@ -257,8 +261,10 @@ def test_cmd_push_no_force_unprotected_ancestor_s3_zip(
     assert s3_remote.s3 == session_client_mock.return_value
 
     res = s3_remote.cmd_push(f"push refs/heads/{BRANCH}:refs/heads/{BRANCH}")
-    assert session_client_mock.return_value.put_object.call_count == 2
-    assert session_client_mock.return_value.delete_object.call_count == 1
+    put_calls = [c for c in session_client_mock.return_value.put_object.call_args_list if not c.kwargs["Key"].endswith(".lock")]
+    assert len(put_calls) == 2
+    del_calls = [c for c in session_client_mock.return_value.delete_object.call_args_list if not c.kwargs["Key"].endswith(".lock")]
+    assert len(del_calls) == 1
     assert res == (f"ok refs/heads/{BRANCH}\n")
 
 
@@ -283,7 +289,8 @@ def test_cmd_push_no_force_unprotected_no_ancestor(
     is_ancestor_mock.return_value = False
     assert s3_remote.s3 == session_client_mock.return_value
     res = s3_remote.cmd_push(f"push refs/heads/{BRANCH}:refs/heads/{BRANCH}")
-    assert session_client_mock.return_value.put_object.call_count == 0
+    put_calls = [c for c in session_client_mock.return_value.put_object.call_args_list if not c.kwargs.get("Key", "").endswith(".lock")]
+    assert len(put_calls) == 0
     assert session_client_mock.return_value.delete_object.call_count == 0
     assert res.startswith("error")
 
@@ -308,8 +315,10 @@ def test_cmd_push_force_no_ancestor(
     is_ancestor_mock.return_value = False
     assert s3_remote.s3 == session_client_mock.return_value
     res = s3_remote.cmd_push(f"push +refs/heads/{BRANCH}:refs/heads/{BRANCH}")
-    assert session_client_mock.return_value.put_object.call_count == 1
-    assert session_client_mock.return_value.delete_object.call_count == 1
+    put_calls = [c for c in session_client_mock.return_value.put_object.call_args_list if not c.kwargs["Key"].endswith(".lock")]
+    assert len(put_calls) == 1
+    del_calls = [c for c in session_client_mock.return_value.delete_object.call_args_list if not c.kwargs["Key"].endswith(".lock")]
+    assert len(del_calls) == 1
     assert res.startswith("ok")
 
 
@@ -345,8 +354,10 @@ def test_cmd_push_force_no_ancestor_s3_zip(
     assert s3_remote.s3 == session_client_mock.return_value
 
     res = s3_remote.cmd_push(f"push +refs/heads/{BRANCH}:refs/heads/{BRANCH}")
-    assert session_client_mock.return_value.put_object.call_count == 2
-    assert session_client_mock.return_value.delete_object.call_count == 1
+    put_calls = [c for c in session_client_mock.return_value.put_object.call_args_list if not c.kwargs["Key"].endswith(".lock")]
+    assert len(put_calls) == 2
+    del_calls = [c for c in session_client_mock.return_value.delete_object.call_args_list if not c.kwargs["Key"].endswith(".lock")]
+    assert len(del_calls) == 1
     assert res.startswith("ok")
 
 
@@ -397,8 +408,10 @@ def test_cmd_push_empty_bucket(
     is_ancestor_mock.return_value = False
     assert s3_remote.s3 == session_client_mock.return_value
     res = s3_remote.cmd_push(f"push refs/heads/{BRANCH}:refs/heads/{BRANCH}")
-    assert session_client_mock.return_value.put_object.call_count == 2
-    assert session_client_mock.return_value.delete_object.call_count == 0
+    put_calls = [c for c in session_client_mock.return_value.put_object.call_args_list if not c.kwargs["Key"].endswith(".lock")]
+    assert len(put_calls) == 2
+    del_calls = [c for c in session_client_mock.return_value.delete_object.call_args_list if not c.kwargs["Key"].endswith(".lock")]
+    assert len(del_calls) == 0
     assert res.startswith("ok")
 
 
@@ -438,8 +451,10 @@ def test_cmd_push_empty_bucket_s3_zip(
     assert s3_remote.s3 == session_client_mock.return_value
 
     res = s3_remote.cmd_push(f"push refs/heads/{BRANCH}:refs/heads/{BRANCH}")
-    assert session_client_mock.return_value.put_object.call_count == 3
-    assert session_client_mock.return_value.delete_object.call_count == 0
+    put_calls = [c for c in session_client_mock.return_value.put_object.call_args_list if not c.kwargs["Key"].endswith(".lock")]
+    assert len(put_calls) == 3
+    del_calls = [c for c in session_client_mock.return_value.delete_object.call_args_list if not c.kwargs["Key"].endswith(".lock")]
+    assert len(del_calls) == 0
     assert res.startswith("ok")
 
 
@@ -480,7 +495,7 @@ def test_cmd_push_s3_zip_put_object_params(
 
     s3_remote.cmd_push(f"push refs/heads/{BRANCH}:refs/heads/{BRANCH}")
 
-    put_object_calls = session_client_mock.return_value.put_object.call_args_list
+    put_object_calls = [c for c in session_client_mock.return_value.put_object.call_args_list if not c.kwargs["Key"].endswith(".lock")]
     assert len(put_object_calls) == 2
 
     # Check bundle upload
@@ -649,3 +664,99 @@ def test_cmd_push_delete_fails_with_multiple_heads_s3_zip(session_client_mock):
     res = s3_remote.cmd_push(f"push :refs/heads/{BRANCH}")
     assert session_client_mock.return_value.delete_object.call_count == 0
     assert res.startswith("error")
+
+
+@patch("git_remote_s3.git.bundle")
+@patch("git_remote_s3.git.rev_parse")
+@patch("boto3.Session.client")
+def test_simultaneous_pushes_single_bundle_remains(
+    session_client_mock, rev_parse_mock, bundle_mock
+):
+    s3_remote = S3Remote(UriScheme.S3, None, "test_bucket", "test_prefix")
+
+    storage = {}
+    lock_keys = []
+    storage_lock = threading.Lock()
+
+    def list_objects_v2_side_effect(Bucket, Prefix, **kwargs):
+        with storage_lock:
+            if Prefix.endswith("/LOCKS/"):
+                contents = [{"Key": k, "LastModified": datetime.datetime.now()} for k in lock_keys]
+            else:
+                contents = [
+                    {"Key": k, "LastModified": datetime.datetime.now()}
+                    for k in storage.keys()
+                    if k.startswith(Prefix)
+                ]
+        return {"Contents": contents, "NextContinuationToken": None}
+
+    def put_object_side_effect(Bucket, Key, Body=None, **kwargs):
+        with storage_lock:
+            # Simulate S3 conditional writes for lock creation using If-None-Match
+            if Key.endswith(".lock"):
+                if kwargs.get("IfNoneMatch") == "*":
+                    if Key in lock_keys:
+                        raise botocore.exceptions.ClientError(
+                            {
+                                "ResponseMetadata": {"HTTPStatusCode": 412},
+                                "Error": {"Code": "PreconditionFailed"},
+                            },
+                            "put_object",
+                        )
+                    lock_keys.append(Key)
+                else:
+                    lock_keys.append(Key)
+            else:
+                data = Body.read() if hasattr(Body, "read") else Body or b""
+                storage[Key] = data
+        return {}
+
+    def delete_object_side_effect(Bucket, Key):
+        with storage_lock:
+            storage.pop(Key, None)
+            try:
+                lock_keys.remove(Key)
+            except ValueError:
+                pass
+        return {}
+
+    session_client_mock.return_value.list_objects_v2.side_effect = list_objects_v2_side_effect
+    session_client_mock.return_value.put_object.side_effect = put_object_side_effect
+    session_client_mock.return_value.delete_object.side_effect = delete_object_side_effect
+
+    def rev_parse_side_effect(local_ref: str):
+        return SHA1 if "branch1" in local_ref else SHA2
+
+    rev_parse_mock.side_effect = rev_parse_side_effect
+
+    def bundle_side_effect(folder: str, sha: str, ref: str):
+        temp_file = tempfile.NamedTemporaryFile(dir=folder, suffix=BUNDLE_SUFFIX, delete=False)
+        with open(temp_file.name, "wb") as f:
+            f.write(MOCK_BUNDLE_CONTENT)
+        return temp_file.name
+
+    bundle_mock.side_effect = bundle_side_effect
+
+    remote_ref = f"refs/heads/{BRANCH}"
+
+    t1 = threading.Thread(
+        target=s3_remote.cmd_push, args=(f"push refs/heads/branch1:{remote_ref}",)
+    )
+    t2 = threading.Thread(
+        target=s3_remote.cmd_push, args=(f"push refs/heads/branch2:{remote_ref}",)
+    )
+
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    with storage_lock:
+        bundles = [
+            k
+            for k in storage.keys()
+            if k.startswith(f"test_prefix/{remote_ref}/") and k.endswith(".bundle")
+        ]
+
+    assert len(bundles) == 1
+    assert bundles[0].endswith(f"/{SHA1}.bundle") or bundles[0].endswith(f"/{SHA2}.bundle")
