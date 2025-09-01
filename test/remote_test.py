@@ -723,6 +723,10 @@ def test_simultaneous_pushes_single_bundle_remains(
     session_client_mock.return_value.list_objects_v2.side_effect = list_objects_v2_side_effect
     session_client_mock.return_value.put_object.side_effect = put_object_side_effect
     session_client_mock.return_value.delete_object.side_effect = delete_object_side_effect
+    # Provide a concrete LastModified for lock head checks (non-stale)
+    session_client_mock.return_value.head_object.side_effect = (
+        lambda Bucket, Key: {"LastModified": datetime.datetime.now()}
+    )
 
     def rev_parse_side_effect(local_ref: str):
         return SHA1 if "branch1" in local_ref else SHA2
@@ -758,5 +762,62 @@ def test_simultaneous_pushes_single_bundle_remains(
             if k.startswith(f"test_prefix/{remote_ref}/") and k.endswith(".bundle")
         ]
 
+    # Only one push should succeed due to per-ref locking; the other will fail to acquire lock
     assert len(bundles) == 1
     assert bundles[0].endswith(f"/{SHA1}.bundle") or bundles[0].endswith(f"/{SHA2}.bundle")
+
+
+@patch("boto3.Session.client")
+def test_acquire_lock_deletes_stale_and_reacquires(session_client_mock):
+    s3_remote = S3Remote(UriScheme.S3, None, "test_bucket", "test_prefix")
+
+    # Ensure initial list call in constructor succeeds
+    session_client_mock.return_value.list_objects_v2.return_value = {
+        "Contents": [],
+        "NextContinuationToken": None,
+    }
+
+    # Simulate existing lock causing first put to fail with 412, then succeed after delete
+    attempts = {"count": 0}
+
+    def put_object_side_effect(Bucket, Key, Body=None, IfNoneMatch=None, **kwargs):
+        if Key.endswith(".lock") and IfNoneMatch == "*":
+            if attempts["count"] == 0:
+                attempts["count"] += 1
+                raise botocore.exceptions.ClientError(
+                    {
+                        "ResponseMetadata": {"HTTPStatusCode": 412},
+                        "Error": {"Code": "PreconditionFailed"},
+                    },
+                    "put_object",
+                )
+        return {}
+
+    # Stale lock: last_modified far in the past
+    def head_object_side_effect(Bucket, Key):
+        return {"LastModified": datetime.datetime.now() - datetime.timedelta(seconds=120)}
+
+    session_client_mock.return_value.put_object.side_effect = put_object_side_effect
+    session_client_mock.return_value.head_object.side_effect = head_object_side_effect
+    session_client_mock.return_value.delete_object.return_value = {}
+
+    # Make TTL small enough so 120s old is stale
+    s3_remote.lock_ttl_seconds = 60
+
+    remote_ref = f"refs/heads/{BRANCH}"
+    lock_key = s3_remote.acquire_lock(remote_ref)
+
+    expected_lock_key = f"test_prefix/{remote_ref}/LOCK#.lock"
+    assert lock_key == expected_lock_key
+
+    # Verify delete was called exactly once for the stale lock
+    delete_calls = [
+        c for c in session_client_mock.return_value.delete_object.call_args_list if c.kwargs["Key"].endswith(".lock")
+    ]
+    assert len(delete_calls) == 1
+
+    # Verify put was attempted at least twice (initial fail + reacquire)
+    put_lock_calls = [
+        c for c in session_client_mock.return_value.put_object.call_args_list if c.kwargs.get("Key", "").endswith(".lock")
+    ]
+    assert len(put_lock_calls) >= 2

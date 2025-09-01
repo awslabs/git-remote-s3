@@ -227,15 +227,22 @@ class S3Remote:
             # Acquire per-ref lock to avoid concurrent writes
             lock_key = self.acquire_lock(remote_ref)
             if not lock_key:
-                return f'error {remote_ref} "failed to acquire ref lock. Please retry."?\n'
+                # Provide clear guidance to the user; include lock path and TTL
+                lock_path = f"{self.prefix}/{remote_ref}/LOCK#.lock"
+                return (
+                    f'error {remote_ref} '
+                    f'"failed to acquire ref lock at {lock_path}. '
+                    f'Another client may be pushing. If this persists beyond {self.lock_ttl_seconds}s, '
+                    f'run git-remote-s3 doctor --lock-ttl {self.lock_ttl_seconds} to inspect and optionally clear stale locks."?\n'
+                )
 
-            # Check if the remote ref state changed between first check and lock acquisition
             # If remote has multiple bundles for the ref, then reject push and notify client(s)
             # to upgrade to new locking behavior
             # Otherwise, proceed with pushing the new bundle 
             current_contents = self.get_bundles_for_ref(remote_ref)
             if len(current_contents) > 1:
                 return f'error {remote_ref} "multiple bundles exists for the same ref on server. Run git-s3 doctor to fix. Upgrade git-remote-s3 to latest version to prevent this in the future."\n'
+
             current_remote_to_remove = (
                 current_contents[0]["Key"] if len(current_contents) == 1 else None
             )
@@ -256,7 +263,7 @@ class S3Remote:
             self.init_remote_head(remote_ref)
             logger.info(f"pushed {temp_file} to {remote_ref}")
             if remote_to_remove:
-                self.s3.delete_object(Bucket=self.bucket, Key=current_remote_to_remove)
+                self.s3.delete_object(Bucket=self.bucket, Key=remote_to_remove)
 
             if self.uri_scheme == UriScheme.S3_ZIP:
                 # Create and push a zip archive next to the bundle file
@@ -347,6 +354,7 @@ class S3Remote:
         Client attempts to create a single lock object under <prefix>/<ref>/ using
         S3's HTTP `If-None-Match` conditional header so that only one client can write the
         lock in case of acquisition races. 
+        If unable to acquire the lock, check for staleness of the lock and delete it if it is stale.
         Clients that lose the race will get a `412 PreconditionFailed` and should retry later.
 
         Returns the lock key if acquired, or None otherwise.
