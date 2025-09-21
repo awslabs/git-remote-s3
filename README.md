@@ -345,11 +345,11 @@ Due to the distributed nature of `git`, there might be cases (albeit rare) where
 The git command executes the push in 4 steps:
 
 1. first it checks if the remote reference is the correct ancestor for the commit being pushed
-2. if that is correct it invokes the `git-remote-s3` command then attempts acquire a lock by creating the lock object`<prefix>/<ref>/LOCK#.lock` using S3 condtional writes.
+2. if that is correct it invokes the `git-remote-s3` command then attempts acquire a lock by creating the lock object `<prefix>/<ref>/LOCK#.lock` using S3 conditional writes.
 3. while holding the lock, `git-remote-s3` safely writes the bundle to the S3 bucket at the `refs/heads/<branch>` path
-4. `git-remote-s3` deletes that the lock object after the push succeeds, thereby releasing the lock for that ref
+4. `git-remote-s3` deletes the lock object after the push succeeds, thereby releasing the lock for that ref
 
-In case two (or more) `git push` command are executed at the same time from different clients, only one client will acquire the lock due to S3's conditional write guarentee. Clients that fail to acquire the lock will fail with the error
+Clients that fail to acquire the lock will fail with the following error and can try to push again.
 
 ```
 error refs/heads/main "failed to acquire ref lock at my-repo/refs/heads/main/LOCK#.lock. 
