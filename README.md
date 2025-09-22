@@ -340,7 +340,6 @@ This locking mechanism eliminates the race conditions that could previously resu
 
 Due to the distributed nature of `git`, there might be cases (albeit rare) where 2 or more `git push` are executed at the same time by different user with their own modification of the same branch. `git-remote-s3` implements **per-reference locking** to prevent concurrent write conflicts in those cases.
 
-
 #### Per-reference locking
 The git command executes the push in 4 steps:
 
@@ -358,8 +357,8 @@ run git-remote-s3 doctor --lock-ttl 60 to inspect and optionally clear stale loc
 ```
 
 The per-reference locks automatically expire after 60 seconds by default. This TTL is configurable via `GIT_REMOTE_S3_LOCK_TTL` environment variable
-If for some reason a lock becomes stale, `git-remote-s3` automatically replaces it during lock acquisition.
-To manually clean up stale locks, run `git-remote-s3 doctor <s3-uri> --lock-ttl <seconds>` to inspect and optionally remove those stale locks.
+If for some reason a reference's lock becomes stale, `git-remote-s3` automatically clears it when executing a git push.
+If you repeatedly run into lock acquisition failures or otherwise want to manually clean up stale locks, run `git-remote-s3 doctor <s3-uri> --lock-ttl <seconds>` to inspect and optionally remove those stale locks.
 
 #### Multiple branch heads
 In the (rare) case where multiple `git push` commands are simultaneously executed with one or more clients running an outdated version of `git-remote-s3` without locking proection, then it is possible that that multiple bundles will be written to S3 for the same branch head. All subsequent `git push` commands will fail with the following error:

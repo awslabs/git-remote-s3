@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import boto3
-from .remote import parse_git_url
+from .remote import parse_git_url, DEFAULT_LOCK_TTL_SECONDS
 import argparse
 import sys
 import uuid
@@ -16,13 +16,6 @@ from botocore.exceptions import (
 )
 from .git import get_remote_url, GitError
 import datetime
-
-
-def _parse_ttl_seconds(value: str) -> int:
-    try:
-        return int(value)
-    except Exception:
-        return 60
 
 
 class Doctor:
@@ -256,9 +249,9 @@ def main():
     )
     parser.add_argument(
         "--lock-ttl",
-        type=_parse_ttl_seconds,
-        default=60,
-        help="Seconds after which a lock is considered stale (default: 60)",
+        type=int,
+        default=DEFAULT_LOCK_TTL_SECONDS,
+        help=f"Seconds after which a lock is considered stale (default: {DEFAULT_LOCK_TTL_SECONDS})",
     )
     parser.add_argument(
         "--delete-stale-locks",
@@ -288,8 +281,8 @@ def main():
                 bucket,
                 prefix,
                 args.delete_bundle,
-                lock_ttl_seconds=args.lock_ttl,
-                delete_stale_locks=args.delete_stale_locks,
+                args.lock_ttl,
+                args.delete_stale_locks,
             )
             doctor.run()
         if (

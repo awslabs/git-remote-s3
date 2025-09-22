@@ -17,8 +17,6 @@ from boto3.s3.transfer import TransferConfig
 import re
 import tempfile
 import os
-import uuid
-import time
 import concurrent.futures
 from threading import Lock
 
@@ -44,6 +42,7 @@ if "remote" in __name__:
         format="%(name)s: %(levelname)s: %(message)s",
     )
 
+DEFAULT_LOCK_TTL_SECONDS = 60
 
 class BucketNotFoundError(Exception):
     def __init__(self, bucket: str):
@@ -93,9 +92,9 @@ class S3Remote:
         self.fetch_cmds = []  # Store fetch commands for batch processing
         # Lock TTL (seconds); can be configured via env var
         try:
-            self.lock_ttl_seconds = int(os.environ.get("GIT_REMOTE_S3_LOCK_TTL", "60"))
+            self.lock_ttl_seconds = int(os.environ.get("GIT_REMOTE_S3_LOCK_TTL_SECONDS", DEFAULT_LOCK_TTL_SECONDS))
         except ValueError:
-            self.lock_ttl_seconds = 60
+            self.lock_ttl_seconds = DEFAULT_LOCK_TTL_SECONDS
 
     def list_refs(self, *, bucket: str, prefix: str) -> list:
         res = self.s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
