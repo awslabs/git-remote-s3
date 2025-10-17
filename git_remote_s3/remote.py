@@ -42,6 +42,7 @@ if "remote" in __name__:
         format="%(name)s: %(levelname)s: %(message)s",
     )
 
+DEFAULT_LOCK_TTL_SECONDS = 60
 
 class BucketNotFoundError(Exception):
     def __init__(self, bucket: str):
@@ -89,6 +90,11 @@ class S3Remote:
         self.fetched_refs_lock = Lock()  # Lock for thread-safe access to fetched_refs
         self.push_cmds = []
         self.fetch_cmds = []  # Store fetch commands for batch processing
+        # Lock TTL (seconds); can be configured via env var
+        try:
+            self.lock_ttl_seconds = int(os.environ.get("GIT_REMOTE_S3_LOCK_TTL_SECONDS", DEFAULT_LOCK_TTL_SECONDS))
+        except ValueError:
+            self.lock_ttl_seconds = DEFAULT_LOCK_TTL_SECONDS
 
     def list_refs(self, *, bucket: str, prefix: str) -> list:
         res = self.s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
@@ -206,6 +212,7 @@ class S3Remote:
 
         remote_to_remove = contents[0]["Key"] if len(contents) == 1 else None
         sha: Optional[str] = None
+        lock_key: Optional[str] = None
         try:
             sha = git.rev_parse(local_ref)
             if remote_to_remove:
@@ -213,7 +220,37 @@ class S3Remote:
                 if not force_push and not git.is_ancestor(remote_sha, sha):
                     return f'error {remote_ref} "remote ref is not ancestor of {local_ref}."?\n'
 
+            # Create the bundle before acquiring the lock (local operation)
             temp_file = git.bundle(folder=temp_dir, sha=sha, ref=local_ref)
+
+            # Acquire per-ref lock to avoid concurrent writes
+            lock_key = self.acquire_lock(remote_ref)
+            if not lock_key:
+                # Provide clear guidance to the user; include lock path and TTL
+                lock_path = f"{self.prefix}/{remote_ref}/LOCK#.lock"
+                return (
+                    f'error {remote_ref} '
+                    f'"failed to acquire ref lock at {lock_path}. '
+                    f'Another client may be pushing. If this persists beyond {self.lock_ttl_seconds}s, '
+                    f'run git-remote-s3 doctor --lock-ttl {self.lock_ttl_seconds} to inspect and optionally clear stale locks."?\n'
+                )
+
+            # If remote has multiple bundles for the ref, then reject push and notify client(s)
+            # to upgrade to new locking behavior
+            # Otherwise, proceed with pushing the new bundle 
+            current_contents = self.get_bundles_for_ref(remote_ref)
+            if len(current_contents) > 1:
+                return f'error {remote_ref} "multiple bundles exists for the same ref on server. Run git-s3 doctor to fix. Upgrade git-remote-s3 to latest version to prevent this in the future."\n'
+
+            current_remote_to_remove = (
+                current_contents[0]["Key"] if len(current_contents) == 1 else None
+            )
+            if (
+                remote_to_remove is not None
+                and current_remote_to_remove is not None
+                and current_remote_to_remove != remote_to_remove
+            ):
+                return f'error {remote_ref} "stale remote. Please fetch and retry."?\n'
 
             with open(temp_file, "rb") as f:
                 self.s3.put_object(
@@ -221,6 +258,7 @@ class S3Remote:
                     Key=f"{self.prefix}/{remote_ref}/{sha}.bundle",
                     Body=f,
                 )
+
             self.init_remote_head(remote_ref)
             logger.info(f"pushed {temp_file} to {remote_ref}")
             if remote_to_remove:
@@ -255,7 +293,13 @@ class S3Remote:
             logger.info(f"fatal: {e}\n")
             return f'error {remote_ref} "{e}"?\n'
         finally:
-            if os.path.exists(f"{temp_dir}/{sha}.bundle"):
+            if lock_key:
+                try:
+                    self.release_lock(remote_ref, lock_key)
+                except Exception as e:
+                    logger.info(f"failed to release lock {lock_key} for {remote_ref}: {e}")
+                    return f'error {remote_ref} "failed to release lock. You may need to manually remove the lock {lock_key} from the server or use git-s3 doctor to fix."?\n'
+            if sha and os.path.exists(f"{temp_dir}/{sha}.bundle"):
                 os.remove(f"{temp_dir}/{sha}.bundle")
 
     def init_remote_head(self, ref: str) -> None:
@@ -291,7 +335,10 @@ class S3Remote:
             for c in self.s3.list_objects_v2(
                 Bucket=self.bucket, Prefix=f"{self.prefix}/{remote_ref}/"
             ).get("Contents", [])
-            if "PROTECTED#" not in c["Key"] and ".zip" not in c["Key"]
+            if "PROTECTED#" not in c["Key"]
+            and ".zip" not in c["Key"]
+            and "/LOCKS/" not in c["Key"]
+            and not c["Key"].endswith(".lock")
         ]
 
     def is_protected(self, remote_ref):
@@ -299,6 +346,72 @@ class S3Remote:
             Bucket=self.bucket, Prefix=f"{self.prefix}/{remote_ref}/PROTECTED#"
         ).get("Contents", [])
         return protected
+
+    def acquire_lock(self, remote_ref: str) -> Optional[str]:
+        """Acquire a per-ref lock using S3 conditional writes.
+
+        Client attempts to create a single lock object under <prefix>/<ref>/ using
+        S3's HTTP `If-None-Match` conditional header so that only one client can write the
+        lock in case of acquisition races. 
+        If unable to acquire the lock, check for staleness of the lock and delete it if it is stale.
+        Clients that lose the race will get a `412 PreconditionFailed` and should retry later.
+
+        Returns the lock key if acquired, or None otherwise.
+        """
+
+        lock_key = f"{self.prefix}/{remote_ref}/LOCK#.lock"
+        try:
+            # Use conditional write to create the lock only if it does not exist
+            self.s3.put_object(
+                Bucket=self.bucket,
+                Key=lock_key,
+                Body=b"",
+                IfNoneMatch="*",
+            )
+            return lock_key
+        except botocore.exceptions.ClientError as e:
+            # 412 PreconditionFailed when the lock already exists
+            if (
+                e.response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 412
+                or e.response.get("Error", {}).get("Code") in [
+                    "PreconditionFailed",
+                    "412",
+                ]
+            ):
+                # Check if the existing lock is stale; if so, try to clear and acquire
+                try:
+                    head = self.s3.head_object(Bucket=self.bucket, Key=lock_key)
+                    last_modified = head.get("LastModified")
+                    if last_modified is not None:
+                        import datetime
+
+                        now = datetime.datetime.now(tz=last_modified.tzinfo)
+                        age = (now - last_modified).total_seconds()
+                        if age > self.lock_ttl_seconds:
+                            # Attempt to delete stale lock and re-acquire
+                            self.s3.delete_object(Bucket=self.bucket, Key=lock_key)
+                            # Retry conditional put
+                            self.s3.put_object(
+                                Bucket=self.bucket,
+                                Key=lock_key,
+                                Body=b"",
+                                IfNoneMatch="*",
+                            )
+                            return lock_key
+                except botocore.exceptions.ClientError as e:
+                    logger.info(f"failed to check staleness of {lock_key} for {remote_ref}: {e}")
+                    raise e
+            raise
+
+    def release_lock(self, remote_ref: str, lock_key: str) -> None:
+        """Release a previously acquired lock for the given ref."""
+        try:
+            self.s3.delete_object(Bucket=self.bucket, Key=lock_key)
+        except botocore.exceptions.ClientError as e:
+            if e.response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 404:
+                logger.info(f"lock {lock_key} already released")
+            else:
+                raise
 
     def cmd_option(self, arg: str):
         option, value = arg.split(" ")[1:]
