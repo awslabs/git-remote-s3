@@ -173,7 +173,7 @@ class S3Remote:
         logger.info(f"Removing remote ref {remote_ref}")
         try:
             objects_to_delete = self.s3.list_objects_v2(
-                Bucket=self.bucket, Prefix=f"{self.prefix}/{remote_ref}"
+                Bucket=self.bucket, Prefix=f"{self.prefix}/{remote_ref}/"
             ).get("Contents", [])
             if (
                 self.uri_scheme == UriScheme.S3
@@ -184,8 +184,10 @@ class S3Remote:
                 for object in objects_to_delete:
                     self.s3.delete_object(Bucket=self.bucket, Key=object["Key"])
                 return f"ok {remote_ref}\n"
-            else:
+            elif len(objects_to_delete) == 0:
                 return f"error {remote_ref} not found\n"
+            else:
+                return f'error {remote_ref} "multiple bundles exists on server. Run git-s3 doctor to fix."?\n'  # noqa: B950
 
         except ClientError as e:
             if e.response["Error"]["Code"] == "404":
