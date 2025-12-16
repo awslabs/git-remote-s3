@@ -483,17 +483,30 @@ class S3Remote:
         if not cmds:
             return
 
-        logger.info(f"Processing {len(cmds)} fetch commands in parallel")
+        # Deduplicate commands by SHA before processing. Git sends all fetch
+        # commands in a batch before the empty line delimiter, and may send
+        # duplicate commands for the same SHA (e.g., when HEAD and a branch
+        # ref point to the same commit). Deduplicating here avoids redundant
+        # parallel downloads of the same bundle.
+        seen_shas = set()
+        unique_cmds = []
+        for cmd in cmds:
+            sha = cmd.split(" ")[1]
+            if sha not in seen_shas:
+                seen_shas.add(sha)
+                unique_cmds.append(cmd)
+
+        logger.info(f"Processing {len(unique_cmds)} unique fetch commands in parallel")
 
         # Use a thread pool to process fetch commands in parallel
         with concurrent.futures.ThreadPoolExecutor() as executor:
             # Submit all fetch commands to the thread pool
-            futures = [executor.submit(self.cmd_fetch, cmd) for cmd in cmds]
+            futures = [executor.submit(self.cmd_fetch, cmd) for cmd in unique_cmds]
 
             # Wait for all fetch commands to complete
             concurrent.futures.wait(futures)
 
-        logger.info(f"Completed processing {len(cmds)} fetch commands in parallel")
+        logger.info(f"Completed processing {len(unique_cmds)} fetch commands in parallel")
 
     def process_cmd(self, cmd: str):  # noqa: C901
         if cmd.startswith("fetch"):
