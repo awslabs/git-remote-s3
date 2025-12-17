@@ -486,14 +486,22 @@ class S3Remote:
         logger.info(f"Processing {len(cmds)} fetch commands in parallel")
 
         # Use a thread pool to process fetch commands in parallel
-        with concurrent.futures.ThreadPoolExecutor() as executor:
+        executor = concurrent.futures.ThreadPoolExecutor()
+        try:
             # Submit all fetch commands to the thread pool
             futures = [executor.submit(self.cmd_fetch, cmd) for cmd in cmds]
 
             # Wait for all fetch commands to complete
             concurrent.futures.wait(futures)
-
-        logger.info(f"Completed processing {len(cmds)} fetch commands in parallel")
+            logger.info(f"Completed processing {len(cmds)} fetch commands in parallel")
+        except KeyboardInterrupt:
+            # Cancel pending futures and shutdown immediately on Ctrl+C
+            for future in futures:
+                future.cancel()
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+        finally:
+            executor.shutdown(wait=False)
 
     def process_cmd(self, cmd: str):  # noqa: C901
         if cmd.startswith("fetch"):
