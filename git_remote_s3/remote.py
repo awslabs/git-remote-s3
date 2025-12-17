@@ -21,11 +21,35 @@ import concurrent.futures
 from threading import Lock
 
 import botocore.exceptions
+from tqdm import tqdm
+
 from git_remote_s3 import git
 from .enums import UriScheme
 from .common import parse_git_url
 import botocore
 from typing import Optional
+
+
+class DownloadProgressCallback:
+    """Callback class for tracking S3 download progress with tqdm."""
+
+    def __init__(self, total_size: int, ref: str):
+        self.total_size = total_size
+        self.progress_bar = tqdm(
+            total=total_size,
+            unit="B",
+            unit_scale=True,
+            unit_divisor=1024,
+            desc=f"Downloading {ref}",
+            file=sys.stderr,
+            leave=False,
+        )
+
+    def __call__(self, bytes_transferred: int):
+        self.progress_bar.update(bytes_transferred)
+
+    def close(self):
+        self.progress_bar.close()
 
 logger = logging.getLogger(__name__)
 if "remote" in __name__:
@@ -90,6 +114,7 @@ class S3Remote:
         self.fetched_refs_lock = Lock()  # Lock for thread-safe access to fetched_refs
         self.push_cmds = []
         self.fetch_cmds = []  # Store fetch commands for batch processing
+        self.verbosity = 1  # Default verbosity level; updated by cmd_option
         # Lock TTL (seconds); can be configured via env var
         try:
             self.lock_ttl_seconds = int(os.environ.get("GIT_REMOTE_S3_LOCK_TTL_SECONDS", DEFAULT_LOCK_TTL_SECONDS))
@@ -125,9 +150,20 @@ class S3Remote:
                 return
         logger.info(f"fetch {sha} {ref}")
         temp_dir: Optional[str] = None
+        progress_callback: Optional[DownloadProgressCallback] = None
         try:
             temp_dir = tempfile.mkdtemp(prefix="git_remote_s3_fetch_")
             bundle_path = f"{temp_dir}/{sha}.bundle"
+            bundle_key = f"{self.prefix}/{ref}/{sha}.bundle"
+
+            if self.verbosity >= 2:
+                try:
+                    head_response = self.s3.head_object(Bucket=self.bucket, Key=bundle_key)
+                    file_size = head_response.get("ContentLength", 0)
+                    if file_size > 0:
+                        progress_callback = DownloadProgressCallback(file_size, ref)
+                except ClientError:
+                    pass
 
             # Use TransferConfig for multipart download
             # Multipart Threshold (64 MB):
@@ -150,10 +186,14 @@ class S3Remote:
             # Download file using the TransferConfig
             self.s3.download_file(
                 Bucket=self.bucket,
-                Key=f"{self.prefix}/{ref}/{sha}.bundle",
+                Key=bundle_key,
                 Filename=bundle_path,
                 Config=config,
+                Callback=progress_callback,
             )
+
+            if progress_callback:
+                progress_callback.close()
 
             logger.info(f"fetched {bundle_path} {ref}")
 
@@ -161,6 +201,8 @@ class S3Remote:
             with self.fetched_refs_lock:
                 self.fetched_refs.append(sha)
         except ClientError as e:
+            if progress_callback:
+                progress_callback.close()
             if e.response["Error"]["Code"] == "AccessDenied":
                 raise NotAuthorizedError("GetObject", self.bucket)
             raise e
@@ -417,7 +459,9 @@ class S3Remote:
 
     def cmd_option(self, arg: str):
         option, value = arg.split(" ")[1:]
-        if option == "verbosity" and int(value) >= 2:
+        if option == "verbosity":
+            self.verbosity = int(value)
+        if option == "verbosity" and self.verbosity >= 2:
             # Set both root logger and module logger for complete verbosity
             logging.getLogger().setLevel(logging.INFO)
             logger.setLevel(logging.INFO)
