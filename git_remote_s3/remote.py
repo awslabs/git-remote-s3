@@ -2,30 +2,37 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-import sys
+import concurrent.futures
+import json
 import logging
+import os
+import re
+import sys
+import tempfile
+from threading import Lock
+from typing import Optional
+
 import boto3
 import boto3.exceptions
+import botocore
+import botocore.exceptions
+from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import (
     ClientError,
-    ProfileNotFound,
     CredentialRetrievalError,
     NoCredentialsError,
+    ProfileNotFound,
     UnknownCredentialError,
 )
-from boto3.s3.transfer import TransferConfig
-import re
-import tempfile
-import os
-import concurrent.futures
-from threading import Lock
 
-import botocore.exceptions
 from git_remote_s3 import git
-from .enums import UriScheme
+
 from .common import parse_git_url
-import botocore
-from typing import Optional
+from .enums import UriScheme
+
+# Incremental bundle configuration
+DEFAULT_CHECKPOINT_INTERVAL = 20
+INCREMENTAL_ENABLED = 
 
 logger = logging.getLogger(__name__)
 if "remote" in __name__:
@@ -43,6 +50,7 @@ if "remote" in __name__:
     )
 
 DEFAULT_LOCK_TTL_SECONDS = 60
+
 
 class BucketNotFoundError(Exception):
     def __init__(self, bucket: str):
@@ -92,9 +100,56 @@ class S3Remote:
         self.fetch_cmds = []  # Store fetch commands for batch processing
         # Lock TTL (seconds); can be configured via env var
         try:
-            self.lock_ttl_seconds = int(os.environ.get("GIT_REMOTE_S3_LOCK_TTL_SECONDS", DEFAULT_LOCK_TTL_SECONDS))
+            self.lock_ttl_seconds = int(
+                os.environ.get(
+                    "GIT_REMOTE_S3_LOCK_TTL_SECONDS", DEFAULT_LOCK_TTL_SECONDS
+                )
+            )
         except ValueError:
             self.lock_ttl_seconds = DEFAULT_LOCK_TTL_SECONDS
+
+        # Incremental bundle settings
+        try:
+            self.checkpoint_interval = int(
+                os.environ.get(
+                    "GIT_REMOTE_S3_CHECKPOINT_INTERVAL", DEFAULT_CHECKPOINT_INTERVAL
+                )
+            )
+        except ValueError:
+            self.checkpoint_interval = DEFAULT_CHECKPOINT_INTERVAL
+        
+        self.incremental_enabled = os.environ.get("GIT_REMOTE_S3_INCREMENTAL", "true").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+
+    def get_manifest(self, ref: str) -> Optional[dict]:
+        """Get manifest for a ref, or None if not found."""
+        try:
+            resp = self.s3.get_object(
+                Bucket=self.bucket, Key=f"{self.prefix}/{ref}/manifest.json"
+            )
+            return json.loads(resp["Body"].read().decode("utf-8"))
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "NoSuchKey":
+                return None
+            raise
+
+    def put_manifest(self, ref: str, manifest: dict) -> None:
+        """Upload manifest for a ref."""
+        self.s3.put_object(
+            Bucket=self.bucket,
+            Key=f"{self.prefix}/{ref}/manifest.json",
+            Body=json.dumps(manifest).encode("utf-8"),
+            ContentType="application/json",
+        )
+
+    def get_last_sha(self, manifest: dict) -> str:
+        """Get the latest sha from manifest (from chain or checkpoint)."""
+        if manifest["chain"]:
+            return manifest["chain"][-1]["to"]
+        return manifest["checkpoint"]["sha"]
 
     def list_refs(self, *, bucket: str, prefix: str) -> list:
         res = self.s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
@@ -114,7 +169,8 @@ class S3Remote:
         objs = [
             o["Key"].removeprefix(prefix)[1:]
             for o in contents
-            if o["Key"].startswith(prefix + "/refs") and o["Key"].endswith(".bundle")
+            if o["Key"].startswith(prefix + "/refs")
+            and (o["Key"].endswith(".bundle") or o["Key"].endswith("/manifest.json"))
         ]
         return objs
 
@@ -127,37 +183,46 @@ class S3Remote:
         temp_dir: Optional[str] = None
         try:
             temp_dir = tempfile.mkdtemp(prefix="git_remote_s3_fetch_")
-            bundle_path = f"{temp_dir}/{sha}.bundle"
 
-            # Use TransferConfig for multipart download
-            # Multipart Threshold (64 MB):
-            # - Small enough to ensure multi-part downloads are used when necessary
-            # - Allows parallel downloading to begin early
-            # - Good balance between overhead and parallelization benefits
-            # Chunk Size (16 MB):
-            # - Large enough to minimize HTTP request overhead
-            # - Small enough to allow good parallelization (500 MB file = ~31 chunks)
-            # - Provides reasonable progress granularity for monitoring
-            # - Works well with typical network conditions
             MB = 1024**2
             config = TransferConfig(
-                multipart_threshold=25 * MB,  # 25MB threshold for multipart
-                multipart_chunksize=16 * MB,  # Size of each part
-                use_threads=True,  # Enable threading
-                max_concurrency=8,  # Number of concurrent threads
+                multipart_threshold=25 * MB,
+                multipart_chunksize=16 * MB,
+                use_threads=True,
+                max_concurrency=8,
             )
 
-            # Download file using the TransferConfig
-            self.s3.download_file(
-                Bucket=self.bucket,
-                Key=f"{self.prefix}/{ref}/{sha}.bundle",
-                Filename=bundle_path,
-                Config=config,
-            )
+            # Check for manifest (incremental mode)
+            manifest = self.get_manifest(ref)
 
-            logger.info(f"fetched {bundle_path} {ref}")
+            if manifest is not None:
+                # Download checkpoint + chain bundles
+                bundles = [manifest["checkpoint"]["key"]] + [
+                    e["key"] for e in manifest["chain"]
+                ]
+                logger.info(f"Fetching {len(bundles)} bundles for {ref}")
 
-            git.unbundle(folder=temp_dir, sha=sha, ref=ref)
+                for key in bundles:
+                    filename = key.split("/")[-1]
+                    local_path = f"{temp_dir}/{filename}"
+                    self.s3.download_file(
+                        Bucket=self.bucket, Key=key, Filename=local_path, Config=config
+                    )
+                    git.unbundle(bundle_path=local_path, ref=ref)
+                    os.remove(local_path)
+            else:
+                # Legacy single bundle fetch
+                bundle_path = f"{temp_dir}/{sha}.bundle"
+                self.s3.download_file(
+                    Bucket=self.bucket,
+                    Key=f"{self.prefix}/{ref}/{sha}.bundle",
+                    Filename=bundle_path,
+                    Config=config,
+                )
+                logger.info(f"fetched {bundle_path} {ref}")
+                git.unbundle(bundle_path=bundle_path, ref=ref)
+                os.remove(bundle_path)
+
             with self.fetched_refs_lock:
                 self.fetched_refs.append(sha)
         except ClientError as e:
@@ -166,8 +231,9 @@ class S3Remote:
             raise e
         finally:
             if temp_dir is not None:
-                if os.path.exists(f"{temp_dir}/{sha}.bundle"):
-                    os.remove(f"{temp_dir}/{sha}.bundle")
+                import shutil
+
+                shutil.rmtree(temp_dir, ignore_errors=True)
 
     def remove_remote_ref(self, remote_ref: str) -> str:
         logger.info(f"Removing remote ref {remote_ref}")
@@ -208,67 +274,110 @@ class S3Remote:
         logger.info(f"push !{local_ref}! !{remote_ref}!")
         temp_dir = tempfile.mkdtemp(prefix="git_remote_s3_push_")
 
-        contents = self.get_bundles_for_ref(remote_ref)
-        if len(contents) > 1:
-            return f'error {remote_ref} "multiple bundles exists on server. Run git-s3 doctor to fix."?\n'  # noqa: B950
-
-        remote_to_remove = contents[0]["Key"] if len(contents) == 1 else None
         sha: Optional[str] = None
         lock_key: Optional[str] = None
+        bundles_to_cleanup: list[str] = []
+
         try:
             sha = git.rev_parse(local_ref)
-            if remote_to_remove:
-                remote_sha = remote_to_remove.split("/")[-1].split(".")[0]
-                if not force_push and not git.is_ancestor(remote_sha, sha):
-                    return f'error {remote_ref} "remote ref is not ancestor of {local_ref}."?\n'
 
-            # Create the bundle before acquiring the lock (local operation)
-            temp_file = git.bundle(folder=temp_dir, sha=sha, ref=local_ref)
-
-            # Acquire per-ref lock to avoid concurrent writes
+            # Acquire lock first
             lock_key = self.acquire_lock(remote_ref)
             if not lock_key:
-                # Provide clear guidance to the user; include lock path and TTL
                 lock_path = f"{self.prefix}/{remote_ref}/LOCK#.lock"
                 return (
-                    f'error {remote_ref} '
+                    f"error {remote_ref} "
                     f'"failed to acquire ref lock at {lock_path}. '
-                    f'Another client may be pushing. If this persists beyond {self.lock_ttl_seconds}s, '
+                    f"Another client may be pushing. If this persists beyond {self.lock_ttl_seconds}s, "
                     f'run git-remote-s3 doctor --lock-ttl {self.lock_ttl_seconds} to inspect and optionally clear stale locks."?\n'
                 )
 
-            # If remote has multiple bundles for the ref, then reject push and notify client(s)
-            # to upgrade to new locking behavior
-            # Otherwise, proceed with pushing the new bundle 
-            current_contents = self.get_bundles_for_ref(remote_ref)
-            if len(current_contents) > 1:
-                return f'error {remote_ref} "multiple bundles exists for the same ref on server. Run git-s3 doctor to fix. Upgrade git-remote-s3 to latest version to prevent this in the future."\n'
-
-            current_remote_to_remove = (
-                current_contents[0]["Key"] if len(current_contents) == 1 else None
+            # Check for incremental mode
+            manifest = (
+                self.get_manifest(remote_ref)
+                if self.incremental_enabled and not force_push
+                else None
             )
-            if (
-                remote_to_remove is not None
-                and current_remote_to_remove is not None
-                and current_remote_to_remove != remote_to_remove
-            ):
-                return f'error {remote_ref} "stale remote. Please fetch and retry."?\n'
 
-            with open(temp_file, "rb") as f:
-                self.s3.put_object(
-                    Bucket=self.bucket,
-                    Key=f"{self.prefix}/{remote_ref}/{sha}.bundle",
-                    Body=f,
-                )
+            if manifest is not None:
+                # Incremental push
+                last_sha = self.get_last_sha(manifest)
+                if last_sha == sha:
+                    return f"ok {remote_ref}\n"  # Already up to date
+
+                if not git.is_ancestor(last_sha, sha):
+                    return f'error {remote_ref} "remote ref is not ancestor of {local_ref}."?\n'
+
+                chain_len = len(manifest["chain"])
+                if chain_len >= self.checkpoint_interval:
+                    # Create new checkpoint
+                    logger.info(f"Creating checkpoint (chain length: {chain_len})")
+                    bundles_to_cleanup = [manifest["checkpoint"]["key"]] + [
+                        e["key"] for e in manifest["chain"]
+                    ]
+                    temp_file = git.bundle(folder=temp_dir, sha=sha, ref=local_ref)
+                    bundle_key = f"{self.prefix}/{remote_ref}/{sha}.bundle"
+                    manifest = {
+                        "version": 1,
+                        "checkpoint": {"sha": sha, "key": bundle_key},
+                        "chain": [],
+                    }
+                else:
+                    # Create incremental bundle
+                    logger.info(
+                        f"Creating incremental bundle: {last_sha[:8]}..{sha[:8]}"
+                    )
+                    temp_file = git.bundle(
+                        folder=temp_dir, sha=sha, ref=local_ref, basis=last_sha
+                    )
+                    bundle_key = f"{self.prefix}/{remote_ref}/{sha}.bundle"
+                    manifest["chain"].append(
+                        {"from": last_sha, "to": sha, "key": bundle_key}
+                    )
+
+                with open(temp_file, "rb") as f:
+                    self.s3.put_object(Bucket=self.bucket, Key=bundle_key, Body=f)
+                self.put_manifest(remote_ref, manifest)
+
+            else:
+                # Legacy or first push - check for existing bundles
+                contents = self.get_bundles_for_ref(remote_ref)
+                if len(contents) > 1:
+                    return f'error {remote_ref} "multiple bundles exists on server. Run git-s3 doctor to fix."?\n'
+
+                remote_to_remove = contents[0]["Key"] if contents else None
+                if remote_to_remove:
+                    remote_sha = remote_to_remove.split("/")[-1].split(".")[0]
+                    if not force_push and not git.is_ancestor(remote_sha, sha):
+                        return f'error {remote_ref} "remote ref is not ancestor of {local_ref}."?\n'
+                    bundles_to_cleanup = [remote_to_remove]
+
+                temp_file = git.bundle(folder=temp_dir, sha=sha, ref=local_ref)
+                bundle_key = f"{self.prefix}/{remote_ref}/{sha}.bundle"
+
+                with open(temp_file, "rb") as f:
+                    self.s3.put_object(Bucket=self.bucket, Key=bundle_key, Body=f)
+
+                # Create manifest for future incremental pushes
+                if self.incremental_enabled and not force_push:
+                    manifest = {
+                        "version": 1,
+                        "checkpoint": {"sha": sha, "key": bundle_key},
+                        "chain": [],
+                    }
+                    self.put_manifest(remote_ref, manifest)
 
             self.init_remote_head(remote_ref)
             logger.info(f"pushed {temp_file} to {remote_ref}")
-            if remote_to_remove:
-                self.s3.delete_object(Bucket=self.bucket, Key=remote_to_remove)
+
+            # Cleanup old bundles
+            for key in bundles_to_cleanup:
+                try:
+                    self.s3.delete_object(Bucket=self.bucket, Key=key)
+                except Exception as e:
+                    logger.warning(f"Failed to cleanup {key}: {e}")
 
             if self.uri_scheme == UriScheme.S3_ZIP:
-                # Create and push a zip archive next to the bundle file
-                # Example use-case: Repo on S3 as Source for AWS CodePipeline
                 commit_msg = git.get_last_commit_message()
                 temp_file_archive = git.archive(folder=temp_dir, ref=local_ref)
                 with open(temp_file_archive, "rb") as f:
@@ -279,10 +388,6 @@ class S3Remote:
                         Metadata={"codepipeline-artifact-revision-summary": commit_msg},
                         ContentDisposition=f"attachment; filename=repo-{sha[:8]}.zip",
                     )
-                logger.info(
-                    f"pushed {temp_file_archive} to "
-                    + "{self.prefix}/{remote_ref}/repo.zip with message {commit_msg}"
-                )
 
             return f"ok {remote_ref}\n"
         except git.GitError:
@@ -299,7 +404,9 @@ class S3Remote:
                 try:
                     self.release_lock(remote_ref, lock_key)
                 except Exception as e:
-                    logger.info(f"failed to release lock {lock_key} for {remote_ref}: {e}")
+                    logger.info(
+                        f"failed to release lock {lock_key} for {remote_ref}: {e}"
+                    )
                     return f'error {remote_ref} "failed to release lock. You may need to manually remove the lock {lock_key} from the server or use git-s3 doctor to fix."?\n'
             if sha and os.path.exists(f"{temp_dir}/{sha}.bundle"):
                 os.remove(f"{temp_dir}/{sha}.bundle")
@@ -354,7 +461,7 @@ class S3Remote:
 
         Client attempts to create a single lock object under <prefix>/<ref>/ using
         S3's HTTP `If-None-Match` conditional header so that only one client can write the
-        lock in case of acquisition races. 
+        lock in case of acquisition races.
         If unable to acquire the lock, check for staleness of the lock and delete it if it is stale.
         Clients that lose the race will get a `412 PreconditionFailed` and should retry later.
 
@@ -373,13 +480,12 @@ class S3Remote:
             return lock_key
         except botocore.exceptions.ClientError as e:
             # 412 PreconditionFailed when the lock already exists
-            if (
-                e.response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 412
-                or e.response.get("Error", {}).get("Code") in [
-                    "PreconditionFailed",
-                    "412",
-                ]
-            ):
+            if e.response.get("ResponseMetadata", {}).get(
+                "HTTPStatusCode"
+            ) == 412 or e.response.get("Error", {}).get("Code") in [
+                "PreconditionFailed",
+                "412",
+            ]:
                 # Check if the existing lock is stale; if so, try to clear and acquire
                 try:
                     head = self.s3.head_object(Bucket=self.bucket, Key=lock_key)
@@ -401,7 +507,9 @@ class S3Remote:
                             )
                             return lock_key
                 except botocore.exceptions.ClientError as e:
-                    logger.info(f"failed to check staleness of {lock_key} for {remote_ref}: {e}")
+                    logger.info(
+                        f"failed to check staleness of {lock_key} for {remote_ref}: {e}"
+                    )
                     raise e
             raise
 
@@ -443,10 +551,26 @@ class S3Remote:
                 if e.response["Error"]["Code"] == "NoSuchKey":
                     pass  # ignoring missing HEAD on remote
 
+        listed_refs = set()
+
+        # Check for manifests first (incremental mode refs)
+        for o in objs:
+            if o.endswith("/manifest.json"):
+                ref = o.rsplit("/manifest.json", 1)[0]
+                manifest = self.get_manifest(ref)
+                if manifest:
+                    sha = self.get_last_sha(manifest)
+                    sys.stdout.write(f"{sha} {ref}\n")
+                    listed_refs.add(ref)
+
+        # Then legacy bundles (only for refs not already listed)
         for o in [x for x in objs if re.match(".+/.+/.+/[a-f0-9]{40}.bundle", x)]:
             elements = o.split("/")
             sha = elements[-1].split(".")[0]
-            sys.stdout.write(f"{sha} {'/'.join(elements[:-1])}\n")
+            ref = "/".join(elements[:-1])
+            if ref not in listed_refs:
+                sys.stdout.write(f"{sha} {ref}\n")
+                listed_refs.add(ref)
 
         sys.stdout.write("\n")
         sys.stdout.flush()
