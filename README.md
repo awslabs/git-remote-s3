@@ -230,18 +230,34 @@ Visit [Tutorial: Create a simple pipeline (S3 bucket)](https://docs.aws.amazon.c
 
 To use LFS you need to first install git-lfs. You can refer to the [official documentation](https://git-lfs.com/) on how to do this on your system.
 
-Next, you need enable the S3 integration by running the following command in the repo folder:
+Next, enable the S3 integration in the repo. There are two install modes:
 
 ```bash
+# Per-remote (recommended; required when other LFS remotes coexist)
+git-lfs-s3 install --remote <remote-name>
+
+# Unscoped (back-compat; applies the agent to ALL remotes in the repo)
 git-lfs-s3 install
 ```
 
-which is a short cut for:
+`--remote` writes a per-remote scoped configuration so `git-lfs-s3` only fires for that one remote — letting an S3 remote coexist with non-S3 LFS remotes (e.g. GitHub, GitLab) without breaking their LFS push/pull. Use it whenever the repo has more than one remote.
+
+The bare `git-lfs-s3 install` form sets `lfs.standalonetransferagent` globally and is short for:
 
 ```bash
 git config --add lfs.customtransfer.git-lfs-s3.path git-lfs-s3
 git config --add lfs.standalonetransferagent git-lfs-s3
 ```
+
+`git-lfs-s3 install --remote <name>` instead writes:
+
+```bash
+git config remote.<name>.lfsurl https://lfs-alias.git-remote-s3.test/<bucket>/<prefix>
+git config lfs.<that-url>.standalonetransferagent git-lfs-s3
+git config lfs.customtransfer.git-lfs-s3.path git-lfs-s3
+```
+
+The `lfs-alias.git-remote-s3.test` host is a synthetic, never-contacted match key (the `.test` TLD is reserved by RFC 6761 for non-resolvable use). It exists only because git-lfs's URL parser does not natively understand `s3://` URLs and would otherwise fall back to SSH-style endpoint discovery; setting `remote.<name>.lfsurl` short-circuits that path and gives the scoped agent lookup a stable URL to match against.
 
 ### Creating the repo and pushing
 
@@ -252,13 +268,13 @@ mkdir lfs-repo
 cd lfs-repo
 git init
 git lfs install
-git-lfs-s3 install
+git remote add origin s3://my-git-bucket/lfs-repo
+git-lfs-s3 install --remote origin
 git lfs track "*.tiff"
 git add .gitattributes
 <put file.tiff in the repo>
 git add file.tiff
 git commit -a -m "my first tiff file"
-git remote add origin s3://my-git-bucket/lfs-repo
 git push --set-upstream origin main
 ```
 
@@ -278,7 +294,7 @@ To fix:
 
 ```bash
 cd lfs-repo-clone
-git-lfs-s3 install
+git-lfs-s3 install --remote origin
 git reset --hard main
 ```
 

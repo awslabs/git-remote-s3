@@ -9,7 +9,8 @@ import subprocess
 import boto3
 import threading
 import os
-from .common import parse_git_url
+from typing import Optional
+from .common import parse_git_url, synthetic_lfs_url
 from .git import validate_ref_name
 
 if "lfs" in __name__:
@@ -131,32 +132,156 @@ class LFSProcess:
         sys.stdout.flush()
 
 
-def install():
-    result = subprocess.run(
-        ["git", "config", "--add", "lfs.customtransfer.git-lfs-s3.path", "git-lfs-s3"],
+def _git_config_get(key: str) -> Optional[str]:
+    """Returns the current value of a git config key, or None if unset."""
+    res = subprocess.run(
+        ["git", "config", "--get", key],
+        stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    if result.returncode != 0:
-        sys.stderr.write(result.stderr.decode("utf-8").strip())
-        sys.stderr.flush()
-        sys.exit(1)
-    result = subprocess.run(
-        ["git", "config", "--add", "lfs.standalonetransferagent", "git-lfs-s3"],
+    if res.returncode != 0:
+        return None
+    return res.stdout.decode("utf-8").strip()
+
+
+def _git_config_set(key: str, value: str) -> None:
+    """Sets a git config key to value, replacing any existing values."""
+    res = subprocess.run(
+        ["git", "config", "--replace-all", key, value],
         stderr=subprocess.PIPE,
     )
-    if result.returncode != 0:
-        sys.stderr.write(result.stderr.decode("utf-8").strip())
+    if res.returncode != 0:
+        sys.stderr.write(res.stderr.decode("utf-8").strip() + "\n")
         sys.stderr.flush()
         sys.exit(1)
 
+
+def _list_git_remotes() -> list:
+    """Returns the list of configured git remote names (empty on error)."""
+    res = subprocess.run(
+        ["git", "remote"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if res.returncode != 0:
+        return []
+    return [r for r in res.stdout.decode("utf-8").splitlines() if r.strip()]
+
+
+def _resolve_s3_remote(remote_name: str) -> tuple:
+    """Validates that remote_name exists and points at an S3 URL.
+
+    Returns (bucket, prefix). Exits 1 with a clear error message otherwise.
+    """
+    res = subprocess.run(
+        ["git", "remote", "get-url", remote_name],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if res.returncode != 0:
+        sys.stderr.write(
+            f"error: remote '{remote_name}' is not configured. "
+            f"Add it first with: "
+            f"git remote add {remote_name} s3://<bucket>/<prefix>\n"
+        )
+        sys.stderr.flush()
+        sys.exit(1)
+    url = res.stdout.decode("utf-8").strip()
+    _, _, bucket, prefix = parse_git_url(url)
+    if bucket is None or prefix is None:
+        sys.stderr.write(
+            f"error: remote '{remote_name}' has URL '{url}', which is not "
+            f"an s3:// or s3+zip:// URL. --remote can only scope LFS "
+            f"configuration for S3 remotes.\n"
+        )
+        sys.stderr.flush()
+        sys.exit(1)
+    return bucket, prefix
+
+
+def install(*, remote_name: Optional[str] = None) -> None:
+    """Installs git-lfs-s3 as a custom transfer agent.
+
+    With remote_name=None, writes unscoped configuration that applies to
+    every remote in the repo (back-compat). With remote_name set, writes
+    per-remote scoped configuration so the agent only fires for that one
+    remote — required for coexistence with non-S3 LFS remotes.
+    """
+    if remote_name is None:
+        _install_unscoped()
+    else:
+        _install_scoped(remote_name)
+
+
+def _install_unscoped() -> None:
+    remotes = _list_git_remotes()
+    if len(remotes) > 1:
+        sys.stderr.write(
+            f"warning: multiple remotes configured ({', '.join(remotes)}); "
+            "'git-lfs-s3 install' writes unscoped configuration that "
+            "applies to ALL remotes. If any non-S3 remote uses LFS, "
+            "push/pull may fail. Use 'git-lfs-s3 install --remote <name>' "
+            "to scope to a single S3 remote.\n"
+        )
+        sys.stderr.flush()
+    _git_config_set("lfs.customtransfer.git-lfs-s3.path", "git-lfs-s3")
+    _git_config_set("lfs.standalonetransferagent", "git-lfs-s3")
     sys.stdout.write("git-lfs-s3 installed\n")
+    sys.stdout.flush()
+
+
+def _install_scoped(remote_name: str) -> None:
+    bucket, prefix = _resolve_s3_remote(remote_name)
+    lfs_url = synthetic_lfs_url(bucket, prefix)
+
+    existing_lfsurl = _git_config_get(f"remote.{remote_name}.lfsurl")
+    if existing_lfsurl is not None and existing_lfsurl != lfs_url:
+        sys.stderr.write(
+            f"error: remote.{remote_name}.lfsurl is already set to "
+            f"'{existing_lfsurl}'. git-lfs-s3 will not overwrite an "
+            f"existing LFS URL. If this was set in error, unset it with:\n"
+            f"  git config --unset remote.{remote_name}.lfsurl\n"
+        )
+        sys.stderr.flush()
+        sys.exit(1)
+
+    if _git_config_get("lfs.standalonetransferagent") is not None:
+        sys.stderr.write(
+            "warning: lfs.standalonetransferagent is set unscoped; this "
+            "applies git-lfs-s3 to ALL remotes and will defeat per-remote "
+            "scoping. Unset it with:\n"
+            "  git config --unset lfs.standalonetransferagent\n"
+        )
+        sys.stderr.flush()
+
+    _git_config_set("lfs.customtransfer.git-lfs-s3.path", "git-lfs-s3")
+    _git_config_set(f"remote.{remote_name}.lfsurl", lfs_url)
+    _git_config_set(f"lfs.{lfs_url}.standalonetransferagent", "git-lfs-s3")
+    sys.stdout.write(
+        f"git-lfs-s3 installed for remote '{remote_name}' " f"(LFS alias: {lfs_url})\n"
+    )
     sys.stdout.flush()
 
 
 def main():  # noqa: C901
     if len(sys.argv) > 1:
         if "install" == sys.argv[1]:
-            install()
+            remote_name: Optional[str] = None
+            args = sys.argv[2:]
+            i = 0
+            while i < len(args):
+                if args[i] == "--remote":
+                    if i + 1 >= len(args):
+                        sys.stderr.write("error: --remote requires a value\n")
+                        sys.stderr.flush()
+                        sys.exit(2)
+                    remote_name = args[i + 1]
+                    i += 2
+                else:
+                    sys.stderr.write(f"error: unknown argument to install: {args[i]}\n")
+                    sys.stderr.flush()
+                    sys.exit(2)
+            install(remote_name=remote_name)
             sys.exit(0)
         elif "debug" == sys.argv[1]:
             logger.setLevel(logging.DEBUG)
