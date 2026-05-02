@@ -280,23 +280,11 @@ git push --set-upstream origin main
 
 ### Clone the repo
 
-When cloning a repo using the S3 remote for LFS, `git-lfs` can't know how to fetch the files since we have yet to add the configuration.
-
-It involves 2 extra steps.
-
 ```bash
-% git clone s3://my-git-bucket/lfs-repo lfs-repo-clone
-Error downloading object: file.tiff (54238cf): Smudge error: Error downloading file.tiff (54238cfaaaa42dda05da0e12bf8ee3156763fa35296085ccdef63b13a87837c5): batch request: ssh: Could not resolve hostname s3: Name or service not known: exit status 255
-...
+git clone s3://my-git-bucket/lfs-repo lfs-repo-clone
 ```
 
-To fix:
-
-```bash
-cd lfs-repo-clone
-git-lfs-s3 install --remote origin
-git reset --hard main
-```
+`git-remote-s3` installs the LFS transfer agent in the new repo's local config on first invocation, so `git clone` and `git submodule add` work without extra setup. Set `GIT_REMOTE_S3_AUTO_INSTALL_LFS=0` to opt out; existing `lfs.standalonetransferagent` or `remote.<name>.lfsurl` settings are never overwritten.
 
 ## Notes about specific behaviors of Amazon S3 remotes
 
