@@ -15,6 +15,7 @@ from botocore.exceptions import (
 )
 from boto3.s3.transfer import TransferConfig
 import re
+import subprocess
 import tempfile
 import os
 import concurrent.futures
@@ -64,12 +65,58 @@ class Mode:
     PUSH = "push"
 
 
+def maybe_install_lfs_agent(remote_name: str) -> None:
+    """Install the git-lfs-s3 transfer agent in local git config if unset.
+
+    Skipped when GIT_REMOTE_S3_AUTO_INSTALL_LFS is 0/false/no, or when
+    lfs.standalonetransferagent or remote.<name>.lfsurl is already set.
+    """
+    if os.environ.get("GIT_REMOTE_S3_AUTO_INSTALL_LFS", "1").lower() in (
+        "0",
+        "false",
+        "no",
+    ):
+        return
+
+    if _git_config_get("lfs.standalonetransferagent"):
+        return
+    if _git_config_get(f"remote.{remote_name}.lfsurl"):
+        return
+
+    _git_config_add("lfs.customtransfer.git-lfs-s3.path", "git-lfs-s3")
+    _git_config_add("lfs.standalonetransferagent", "git-lfs-s3")
+
+
+def _git_config_get(key: str) -> Optional[str]:
+    try:
+        out = subprocess.check_output(
+            ["git", "config", "--get", key],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        return out or None
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+
+
+def _git_config_add(key: str, value: str) -> None:
+    try:
+        subprocess.run(
+            ["git", "config", "--add", key, value],
+            check=False,
+            stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        pass
+
+
 class S3Remote:
-    def __init__(self, uri_scheme, profile, bucket, prefix):
+    def __init__(self, uri_scheme, profile, bucket, prefix, *, remote_name=None):
         self.uri_scheme = uri_scheme
         self.profile = profile
         self.bucket = bucket
         self.prefix = prefix
+        self.remote_name = remote_name
         if profile:
             self.session = boto3.Session(profile_name=profile)
         else:
@@ -95,6 +142,11 @@ class S3Remote:
             self.lock_ttl_seconds = int(os.environ.get("GIT_REMOTE_S3_LOCK_TTL_SECONDS", DEFAULT_LOCK_TTL_SECONDS))
         except ValueError:
             self.lock_ttl_seconds = DEFAULT_LOCK_TTL_SECONDS
+
+        # remote_name is only set when invoked via the remote-helper protocol;
+        # gating on it keeps tests from writing to the project's own git config.
+        if remote_name is not None:
+            maybe_install_lfs_agent(remote_name)
 
     def list_refs(self, *, bucket: str, prefix: str) -> list:
         res = self.s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
@@ -538,6 +590,7 @@ class S3Remote:
 
 def main():
     logger.info(sys.argv)
+    remote_name = sys.argv[1] if len(sys.argv) > 1 else None
     remote = sys.argv[2]
     uri_scheme, profile, bucket, prefix = parse_git_url(remote)
     if bucket is None or prefix is None:
@@ -547,7 +600,11 @@ def main():
         sys.exit(1)
     try:
         s3remote = S3Remote(
-            uri_scheme=uri_scheme, profile=profile, bucket=bucket, prefix=prefix
+            uri_scheme=uri_scheme,
+            profile=profile,
+            bucket=bucket,
+            prefix=prefix,
+            remote_name=remote_name,
         )
         while True:
             line = sys.stdin.readline()
