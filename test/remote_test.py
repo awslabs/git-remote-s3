@@ -821,3 +821,54 @@ def test_acquire_lock_deletes_stale_and_reacquires(session_client_mock):
         c for c in session_client_mock.return_value.put_object.call_args_list if c.kwargs.get("Key", "").endswith(".lock")
     ]
     assert len(put_lock_calls) >= 2
+
+
+@patch("boto3.Session.client")
+def test_acquire_lock_claims_own_lock_after_boto3_retry_after_success(session_client_mock):
+    """When boto3 silently retries a PutObject that already succeeded
+    server-side, the retry returns 412 PreconditionFailed. The lock body
+    matches our just-issued token, so acquire_lock claims it instead of
+    waiting for TTL."""
+    s3_remote = S3Remote(UriScheme.S3, None, "test_bucket", "test_prefix")
+    remote_ref = f"refs/heads/{BRANCH}"
+    lock_key = f"test_prefix/{remote_ref}/LOCK#.lock"
+
+    captured_token = {}
+    # Stateful: lock is present until DELETEd, then second PUT succeeds.
+    lock_present = {"v": True}
+
+    def put_object_side_effect(Bucket, Key, Body=None, **kwargs):
+        if Key == lock_key and kwargs.get("IfNoneMatch") == "*":
+            if "v" not in captured_token:
+                captured_token["v"] = Body
+            if lock_present["v"]:
+                raise botocore.exceptions.ClientError(
+                    {
+                        "ResponseMetadata": {"HTTPStatusCode": 412},
+                        "Error": {"Code": "PreconditionFailed"},
+                    },
+                    "put_object",
+                )
+            lock_present["v"] = True
+        return {}
+
+    def delete_object_side_effect(Bucket, Key, **kwargs):
+        if Key == lock_key:
+            lock_present["v"] = False
+        return {}
+
+    def get_object_side_effect(Bucket, Key, **kwargs):
+        return {"Body": BytesIO(captured_token["v"])}
+
+    session_client_mock.return_value.put_object.side_effect = put_object_side_effect
+    session_client_mock.return_value.get_object.side_effect = get_object_side_effect
+    session_client_mock.return_value.delete_object.side_effect = delete_object_side_effect
+    # Non-stale lock — proves the claim path runs via own-token, not staleness.
+    session_client_mock.return_value.head_object.return_value = {
+        "LastModified": datetime.datetime.now(datetime.timezone.utc)
+    }
+
+    assert s3_remote.acquire_lock(remote_ref) == lock_key
+    # Token is an unguessable per-call fingerprint, not a constant.
+    assert len(captured_token["v"]) >= 16
+    assert session_client_mock.return_value.get_object.called
