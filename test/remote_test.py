@@ -821,3 +821,69 @@ def test_acquire_lock_deletes_stale_and_reacquires(session_client_mock):
         c for c in session_client_mock.return_value.put_object.call_args_list if c.kwargs.get("Key", "").endswith(".lock")
     ]
     assert len(put_lock_calls) >= 2
+
+
+@patch("boto3.Session.client")
+def test_acquire_lock_recovers_own_leaked_lock(session_client_mock):
+    """Regression test for the lock-leak bug.
+
+    The original `acquire_lock` raised on every 412 PreconditionFailed unless
+    the existing lock was older than `lock_ttl_seconds`. That left two failure
+    modes leaking the lock for up to a full TTL window:
+
+      1. boto3's automatic retry of a PUT that actually succeeded server-side
+         but lost its response in transit (network blip, R2 returning 5xx
+         after persisting, etc.). The retry sees the lock now exists and
+         returns 412 — the client never gets confirmation it owns the lock.
+      2. Outer-loop retries of `git push` from a wrapping script. Each
+         iteration of the wrapper would see the lock from the previous (failed
+         but actually committed) iteration and bail.
+
+    Both manifest as 412 with a lock whose body was written *by us*. This test
+    pre-populates the lock with the owner token the patched implementation
+    would have used, then asserts that `acquire_lock` recognises the body as
+    its own and returns successfully instead of hanging on staleness.
+    """
+    import os
+    s3_remote = S3Remote(UriScheme.S3, None, "test_bucket", "test_prefix")
+    remote_ref = f"refs/heads/{BRANCH}"
+    lock_key = f"test_prefix/{remote_ref}/LOCK#.lock"
+    # Simulate a leaked lock that contains the owner token the patched code
+    # would write for this (bucket, prefix) pair.
+    expected_token = (
+        os.environ.get("GIT_REMOTE_S3_OWNER_TOKEN", "").encode()
+        or b"git-remote-s3-owner:test_bucket/test_prefix"
+    )
+
+    def put_object_side_effect(Bucket, Key, Body=None, **kwargs):
+        if Key == lock_key and kwargs.get("IfNoneMatch") == "*":
+            raise botocore.exceptions.ClientError(
+                {
+                    "ResponseMetadata": {"HTTPStatusCode": 412},
+                    "Error": {"Code": "PreconditionFailed"},
+                },
+                "put_object",
+            )
+        return {}
+
+    def get_object_side_effect(Bucket, Key, **kwargs):
+        if Key == lock_key:
+            return {"Body": BytesIO(expected_token)}
+        raise botocore.exceptions.ClientError(
+            {"Error": {"Code": "NoSuchKey"}}, "get_object"
+        )
+
+    session_client_mock.return_value.put_object.side_effect = put_object_side_effect
+    session_client_mock.return_value.get_object.side_effect = get_object_side_effect
+    # The patched code never reaches staleness check on the own-leak path,
+    # but provide a non-stale head_object so the test fails loudly if it does.
+    session_client_mock.return_value.head_object.return_value = {
+        "LastModified": datetime.datetime.now(datetime.timezone.utc)
+    }
+    session_client_mock.return_value.delete_object.return_value = {}
+
+    returned = s3_remote.acquire_lock(remote_ref)
+    assert returned == lock_key
+
+    # Sanity check: get_object was called to inspect the existing lock body.
+    assert session_client_mock.return_value.get_object.called

@@ -362,12 +362,28 @@ class S3Remote:
         """
 
         lock_key = f"{self.prefix}/{remote_ref}/LOCK#.lock"
+        # Stable per-client owner token written into the lock body. The token is
+        # derived from the bucket+prefix so it stays the same across:
+        #   (a) boto3's automatic retries of a PUT that actually succeeded
+        #       server-side but lost its response in transit, and
+        #   (b) reinvocations of the helper itself (e.g. an outer wrapper that
+        #       retries `git push` on transient failure).
+        # In both cases the lock body found on a 412 PreconditionFailed will be
+        # ours, and we can correctly claim the lock instead of treating it as
+        # held by someone else and waiting for the TTL to expire.
+        #
+        # Multi-client deployments that share an S3 prefix can override the token
+        # with `GIT_REMOTE_S3_OWNER_TOKEN` to get back the original "always treat
+        # an existing lock as another client's" semantics.
+        token = os.environ.get("GIT_REMOTE_S3_OWNER_TOKEN", "").encode() or (
+            f"git-remote-s3-owner:{self.bucket}/{self.prefix}".encode()
+        )
         try:
             # Use conditional write to create the lock only if it does not exist
             self.s3.put_object(
                 Bucket=self.bucket,
                 Key=lock_key,
-                Body=b"",
+                Body=token,
                 IfNoneMatch="*",
             )
             return lock_key
@@ -380,6 +396,30 @@ class S3Remote:
                     "412",
                 ]
             ):
+                # Own-leak detection: if the existing lock's body matches our
+                # owner token, the lock is ours (either via boto3 retry-after-
+                # success or via an outer retry of this helper) — take it.
+                try:
+                    obj = self.s3.get_object(Bucket=self.bucket, Key=lock_key)
+                    if obj["Body"].read() == token:
+                        # Refresh the lock object so downstream stale-check
+                        # timing behaves like a fresh acquisition.
+                        try:
+                            self.s3.delete_object(Bucket=self.bucket, Key=lock_key)
+                        except botocore.exceptions.ClientError:
+                            pass
+                        try:
+                            self.s3.put_object(
+                                Bucket=self.bucket,
+                                Key=lock_key,
+                                Body=token,
+                                IfNoneMatch="*",
+                            )
+                        except botocore.exceptions.ClientError:
+                            pass
+                        return lock_key
+                except botocore.exceptions.ClientError:
+                    pass
                 # Check if the existing lock is stale; if so, try to clear and acquire
                 try:
                     head = self.s3.head_object(Bucket=self.bucket, Key=lock_key)
@@ -396,7 +436,7 @@ class S3Remote:
                             self.s3.put_object(
                                 Bucket=self.bucket,
                                 Key=lock_key,
-                                Body=b"",
+                                Body=token,
                                 IfNoneMatch="*",
                             )
                             return lock_key
