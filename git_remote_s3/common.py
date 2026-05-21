@@ -34,3 +34,18 @@ def parse_git_url(url: str) -> tuple[UriScheme, str, str, str]:
             uri_scheme = UriScheme.S3_ZIP
 
     return uri_scheme, profile, bucket, prefix
+
+
+LFS_ALIAS_HOST = "lfs-alias.git-remote-s3.test"
+
+
+def synthetic_lfs_url(bucket: str, prefix: str) -> str:
+    """Builds the synthetic LFS endpoint URL for a given bucket and prefix.
+
+    The URL is never contacted; it is purely a stable match key so that
+    ``lfs.<url>.standalonetransferagent`` can be scoped per remote, and so
+    git-lfs's HTTPS-shaped endpoint resolution short-circuits its SSH-style
+    discovery for ``s3://`` URLs. The hostname uses the RFC 6761-reserved
+    ``.test`` TLD to guarantee non-collision with any real host.
+    """
+    return f"https://{LFS_ALIAS_HOST}/{bucket}/{prefix}"
