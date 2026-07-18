@@ -4,6 +4,7 @@
 
 import boto3
 from .remote import parse_git_url, DEFAULT_LOCK_TTL_SECONDS
+from .common import resolve_bucket_alias, BucketAliasError
 import argparse
 import sys
 import uuid
@@ -235,7 +236,7 @@ class ManageBranch:
         print(f"Branch {self.branch} is now unprotected")
 
 
-def main():
+def main():  # noqa: C901
     parser = argparse.ArgumentParser()
     parser.add_argument("command")
     parser.add_argument(
@@ -274,6 +275,12 @@ def main():
         sys.exit(1)
 
     uri_scheme, profile, bucket, prefix = parse_git_url(remote_url)
+    try:
+        bucket = resolve_bucket_alias(bucket)
+    except BucketAliasError as e:
+        sys.stderr.write(f"fatal: {e}\n")
+        sys.stderr.flush()
+        sys.exit(1)
     try:
         if args.command == "doctor":
             doctor = Doctor(

@@ -16,6 +16,7 @@ It also provide an implementation of the [git-lfs custom transfer](https://githu
 - [Use S3 remotes](#use-s3-remotes)
   - [Create a new repo](#create-a-new-repo)
   - [Clone a repo](#clone-a-repo)
+  - [DNS bucket aliases](#dns-bucket-aliases)
   - [Branches, etc.](#branches-etc)
   - [Using S3 remotes for submodules](#using-s3-remotes-for-submodules)
 - [Repo as S3 Source for AWS CodePipeline](#repo-as-s3-source-for-aws-codepipeline)
@@ -170,6 +171,41 @@ To clone the repo to another folder just use the normal git syntax using the s3 
 ```bash
 git clone s3://my-git-bucket/my-repo my-repo-clone
 ```
+
+### DNS bucket aliases
+
+> **Fork addition** (not in upstream awslabs/git-remote-s3): the bucket component of the remote URI can be a DNS hostname aliasing the real bucket.
+
+When the bucket component of the remote URI contains at least one dot, it is treated as a DNS hostname instead of a literal bucket name (bucket names used with this feature must not contain dots). The hostname is resolved to the real bucket name via a DNS TXT lookup using the system resolver, so split-horizon/VPN DNS setups work as usual:
+
+- A TXT record must exist at the alias hostname itself.
+- Among its TXT values, exactly one must have the form `git-bucket=<real-bucket-name>`; other TXT values at the same name are ignored.
+
+For example, with the record
+
+```
+repos.git.example.com. 300 IN TXT "git-bucket=my-git-bucket-123456789012-us-east-2"
+```
+
+the following commands are equivalent:
+
+```bash
+git clone s3://repos.git.example.com/my-repo
+git clone s3://my-git-bucket-123456789012-us-east-2/my-repo
+```
+
+Aliases work in every place a remote URI is accepted: the git remote helper, the `git-lfs-s3` transfer agent and `git-lfs-s3 install --remote`, and the `git-s3` management CLI. Resolution results are cached for the lifetime of the process. If the alias has no TXT record or no `git-bucket=` value, the command fails with an error describing the expected record instead of falling back to using the hostname as a bucket name.
+
+Alias resolution is enabled by default and can be disabled via git config, so a dotted bucket component is treated as a literal bucket name again:
+
+```bash
+# per remote (takes precedence when set):
+git config remote.origin.s3-dns-alias false
+# for all remotes (used when the per-remote key is unset or no remote name is known):
+git config s3.dns-alias false
+```
+
+Both keys are booleans; setting the per-remote key to `true` re-enables aliasing for that remote even when `s3.dns-alias` is `false`. The per-remote key applies where a remote name is available (the git remote helper, the LFS transfer agent, `git-lfs-s3 install --remote`); the `git-s3` CLI takes a URI rather than a remote name and honors only `s3.dns-alias`.
 
 ### Branches, etc.
 

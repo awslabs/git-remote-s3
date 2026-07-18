@@ -24,7 +24,7 @@ from threading import Lock
 import botocore.exceptions
 from git_remote_s3 import git
 from .enums import UriScheme
-from .common import parse_git_url
+from .common import parse_git_url, resolve_bucket_alias, BucketAliasError
 import botocore
 from typing import Optional
 
@@ -597,6 +597,12 @@ def main():
         sys.stderr.write(
             f"fatal: invalid remote '{remote}'. You need to have a bucket and a prefix.\n"
         )
+        sys.exit(1)
+    try:
+        bucket = resolve_bucket_alias(bucket, remote_name)
+    except BucketAliasError as e:
+        sys.stderr.write(f"fatal: {e}\n")
+        sys.stderr.flush()
         sys.exit(1)
     try:
         s3remote = S3Remote(

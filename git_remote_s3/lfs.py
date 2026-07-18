@@ -10,7 +10,12 @@ import boto3
 import threading
 import os
 from typing import Optional
-from .common import parse_git_url, synthetic_lfs_url
+from .common import (
+    parse_git_url,
+    resolve_bucket_alias,
+    synthetic_lfs_url,
+    BucketAliasError,
+)
 from .git import validate_ref_name
 
 logger = logging.getLogger(__name__)
@@ -73,13 +78,21 @@ def write_error_event(*, oid: str, error: str, flush=False):
 
 
 class LFSProcess:
-    def __init__(self, s3uri: str):
+    def __init__(self, s3uri: str, remote_name: Optional[str] = None):
         uri_scheme, profile, bucket, prefix = parse_git_url(s3uri)
         if bucket is None or prefix is None:
             logger.error(f"s3 uri {s3uri} is invalid")
             error_event = {
                 "error": {"code": 32, "message": f"s3 uri {s3uri} is invalid"}
             }
+            sys.stdout.write(f"{json.dumps(error_event)}\n")
+            sys.stdout.flush()
+            return
+        try:
+            bucket = resolve_bucket_alias(bucket, remote_name)
+        except BucketAliasError as e:
+            logger.error(str(e))
+            error_event = {"error": {"code": 32, "message": str(e)}}
             sys.stdout.write(f"{json.dumps(error_event)}\n")
             sys.stdout.flush()
             return
@@ -214,6 +227,12 @@ def _resolve_s3_remote(remote_name: str) -> tuple:
             f"an s3:// or s3+zip:// URL. --remote can only scope LFS "
             f"configuration for S3 remotes.\n"
         )
+        sys.stderr.flush()
+        sys.exit(1)
+    try:
+        bucket = resolve_bucket_alias(bucket, remote_name)
+    except BucketAliasError as e:
+        sys.stderr.write(f"error: {e}\n")
         sys.stderr.flush()
         sys.exit(1)
     return bucket, prefix
@@ -359,7 +378,7 @@ def main():  # noqa: C901
                 sys.stdout.flush()
                 sys.exit(1)
             s3uri = result.stdout.decode("utf-8").strip()
-            lfs_process = LFSProcess(s3uri=s3uri)
+            lfs_process = LFSProcess(s3uri=s3uri, remote_name=event["remote"])
 
         elif event["event"] == "upload":
             lfs_process.upload(event)
