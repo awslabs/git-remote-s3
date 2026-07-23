@@ -1,5 +1,18 @@
 # git-remote-s3
 
+## About this fork
+
+This is a fork of [awslabs/git-remote-s3](https://github.com/awslabs/git-remote-s3), licensed under the
+Apache License 2.0 (unchanged). Notable additions in this fork:
+
+- Fix for LFS temp-file paths when the repo is used as a submodule
+- Per-remote LFS scoping, so a repo can mix an S3 LFS remote with non-S3 remotes
+- Auto-install of the LFS transfer agent on first remote-helper run
+- DNS TXT bucket-alias resolution for `s3://` remote URIs
+- S3 Access Grants support, region-aware S3 clients, and a `git-s3 doctor` diagnostic command
+
+Not affiliated with or endorsed by Amazon Web Services.
+
 This library enables to use Amazon S3 as a git remote and LFS server.
 
 It provides an implementation of a [git remote helper](https://git-scm.com/docs/gitremote-helpers) to use S3 as a serverless Git server.

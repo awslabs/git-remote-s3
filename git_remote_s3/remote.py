@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2023-present Amazon.com, Inc. or its affiliates
 #
 # SPDX-License-Identifier: Apache-2.0
+# Modifications Copyright 2026 FullDuplex Media
+# Changed: Added LFS auto-install, DNS bucket-alias resolution, Access Grants, and scoped list prefixes.
 
 import sys
 import logging

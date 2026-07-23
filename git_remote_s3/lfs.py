@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2023-present Amazon.com, Inc. or its affiliates
 #
 # SPDX-License-Identifier: Apache-2.0
+# Modifications Copyright 2026 FullDuplex Media
+# Changed: Fixed LFS tmp-path for submodules; added per-remote scoping, bucket-alias, and Access Grants.
 
 import sys
 import logging

@@ -1,2 +1,6 @@
 git-remote-s3
 Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved. 
+
+---
+This distribution contains modifications by FullDuplex Media (2026),
+a fork of awslabs/git-remote-s3. See README for details.

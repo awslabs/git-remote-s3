@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2023-present Amazon.com, Inc. or its affiliates
 #
 # SPDX-License-Identifier: Apache-2.0
+# Modifications Copyright 2026 FullDuplex Media
+# Changed: Added DNS TXT bucket-alias resolution, bucket-region detection, and S3 Access Grants helpers.
 
 import functools
 import re

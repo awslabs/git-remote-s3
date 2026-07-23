@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2023-present Amazon.com, Inc. or its affiliates
 #
 # SPDX-License-Identifier: Apache-2.0
+# Modifications Copyright 2026 FullDuplex Media
+# Changed: Added doctor Access Grants diagnostics, bucket-alias resolution, and scoped list prefixes.
 
 import boto3
 from .remote import parse_git_url, DEFAULT_LOCK_TTL_SECONDS
