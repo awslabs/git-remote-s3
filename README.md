@@ -13,6 +13,10 @@ Apache License 2.0 (unchanged). Notable additions in this fork:
 
 Not affiliated with or endorsed by Amazon Web Services.
 
+This fork is published on PyPI as `fduplex-git-remote-s3`, but it installs the same `git-remote-s3`
+command as upstream and therefore replaces it, so a given environment should install
+`fduplex-git-remote-s3` or upstream `git-remote-s3`, not both.
+
 This library enables to use Amazon S3 as a git remote and LFS server.
 
 It provides an implementation of a [git remote helper](https://git-scm.com/docs/gitremote-helpers) to use S3 as a serverless Git server.
@@ -58,7 +62,7 @@ It also provide an implementation of the [git-lfs custom transfer](https://githu
 Run:
 
 ```
-pip install git-remote-s3
+pip install fduplex-git-remote-s3
 ```
 
 ## Prerequisites
