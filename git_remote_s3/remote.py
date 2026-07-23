@@ -276,13 +276,16 @@ class S3Remote:
         if len(contents) > 1:
             return f'error {remote_ref} "multiple bundles exists on server. Run git-s3 doctor to fix."?\n'  # noqa: B950
 
-        remote_to_remove = contents[0]["Key"] if len(contents) == 1 else None
+        # Best-effort fast-fail on a non-fast-forward push before we create the bundle and take the
+        # lock. This is only an optimization; the authoritative reconcile happens under the lock
+        # below, off the state read AFTER acquisition.
+        pre_lock_bundle = contents[0]["Key"] if len(contents) == 1 else None
         sha: str | None = None
         lock_key: str | None = None
         try:
             sha = git.rev_parse(local_ref)
-            if remote_to_remove:
-                remote_sha = remote_to_remove.split("/")[-1].split(".")[0]
+            if pre_lock_bundle:
+                remote_sha = pre_lock_bundle.split("/")[-1].split(".")[0]
                 if not force_push and not git.is_ancestor(remote_sha, sha):
                     return f'error {remote_ref} "remote ref is not ancestor of {local_ref}."?\n'
 
@@ -302,9 +305,10 @@ class S3Remote:
                     f'optionally clear stale locks."?\n'
                 )
 
-            # If remote has multiple bundles for the ref, then reject push and notify client(s)
-            # to upgrade to new locking behavior
-            # Otherwise, proceed with pushing the new bundle
+            # Authoritative view: reconcile against the bundles that exist NOW, under the lock, not
+            # the pre-lock snapshot. A concurrent push whose pre-lock view was empty must still see
+            # (and reconcile against) a bundle another pusher committed before we acquired the lock,
+            # otherwise both writers would leave a bundle and the ref would end up with two.
             current_contents = self.get_bundles_for_ref(remote_ref)
             if len(current_contents) > 1:
                 return (
@@ -313,13 +317,11 @@ class S3Remote:
                     f'prevent this in the future."\n'
                 )
 
-            current_remote_to_remove = current_contents[0]["Key"] if len(current_contents) == 1 else None
-            if (
-                remote_to_remove is not None
-                and current_remote_to_remove is not None
-                and current_remote_to_remove != remote_to_remove
-            ):
-                return f'error {remote_ref} "stale remote. Please fetch and retry."?\n'
+            remote_to_remove = current_contents[0]["Key"] if len(current_contents) == 1 else None
+            if remote_to_remove is not None:
+                remote_sha = remote_to_remove.split("/")[-1].split(".")[0]
+                if not force_push and not git.is_ancestor(remote_sha, sha):
+                    return f'error {remote_ref} "remote ref is not ancestor of {local_ref}."?\n'
 
             with open(temp_file, "rb") as f:
                 self.s3.put_object(

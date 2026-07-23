@@ -1,5 +1,4 @@
 import botocore.client
-import pytest
 from unittest.mock import patch
 from io import StringIO, BytesIO
 from git_remote_s3 import S3Remote, UriScheme
@@ -678,12 +677,6 @@ def test_cmd_push_delete_fails_with_multiple_heads_s3_zip(session_client_mock):
     assert res.startswith("error")
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="Pre-existing TOCTOU race in cmd_push (remote.py:275/317): a pre-lock remote_to_remove==None "
-    "snapshot lets a second concurrent push write a 2nd bundle for the same ref. Upstream bug, tracked in "
-    "#3; not caused by the uv migration.",
-)
 @patch("git_remote_s3.git.bundle")
 @patch("git_remote_s3.git.rev_parse")
 @patch("boto3.Session.client")
