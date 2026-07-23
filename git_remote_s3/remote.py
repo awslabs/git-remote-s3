@@ -24,7 +24,14 @@ from threading import Lock
 import botocore.exceptions
 from git_remote_s3 import git
 from .enums import UriScheme
-from .common import parse_git_url, resolve_bucket_alias, BucketAliasError
+from .common import (
+    parse_git_url,
+    resolve_bucket_alias,
+    register_s3_access_grants,
+    s3_region_kwargs,
+    scoped_list_prefix,
+    BucketAliasError,
+)
 import botocore
 from typing import Optional
 
@@ -121,9 +128,15 @@ class S3Remote:
             self.session = boto3.Session(profile_name=profile)
         else:
             self.session = boto3.Session()
-        self.s3 = self.session.client("s3")
+        self.s3 = register_s3_access_grants(
+            self.session.client("s3", **s3_region_kwargs(self.session, bucket)),
+            self.session,
+        )
         try:
-            self.s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
+            # Scope to exactly this repo: a bare Prefix="core/cli" also matches
+            # a sibling repo like "core/climate", so use the trailing-slash
+            # scoped prefix instead.
+            self.s3.list_objects_v2(Bucket=bucket, Prefix=scoped_list_prefix(prefix))
         except ClientError as e:
             if e.response["Error"]["Code"] == "NoSuchBucket":
                 raise BucketNotFoundError(bucket)
@@ -149,13 +162,16 @@ class S3Remote:
             maybe_install_lfs_agent(remote_name)
 
     def list_refs(self, *, bucket: str, prefix: str) -> list:
-        res = self.s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
+        # Scoped to exactly this repo (see __init__); filtering below still
+        # uses the bare prefix, so results are unchanged.
+        list_prefix = scoped_list_prefix(prefix)
+        res = self.s3.list_objects_v2(Bucket=bucket, Prefix=list_prefix)
         contents = res.get("Contents", [])
         next_token = res.get("NextContinuationToken", None)
 
         while next_token:
             res = self.s3.list_objects_v2(
-                Bucket=bucket, Prefix=prefix, ContinuationToken=next_token
+                Bucket=bucket, Prefix=list_prefix, ContinuationToken=next_token
             )
             contents.extend(res.get("Contents", []))
             next_token = res.get("NextContinuationToken", None)

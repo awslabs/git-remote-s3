@@ -5,10 +5,14 @@
 import functools
 import re
 import subprocess
+import sys
 from typing import Optional
 
 import dns.exception
 import dns.resolver
+from aws_s3_access_grants_boto3_plugin.s3_access_grants_plugin import (
+    S3AccessGrantsPlugin,
+)
 
 from .enums import UriScheme
 
@@ -40,6 +44,18 @@ def parse_git_url(url: str) -> tuple[UriScheme, str, str, str]:
             uri_scheme = UriScheme.S3_ZIP
 
     return uri_scheme, profile, bucket, prefix
+
+
+def scoped_list_prefix(prefix: str) -> str:
+    """Returns an S3 ListObjectsV2 Prefix scoped to exactly this repo.
+
+    Appends a trailing slash so a repo prefix that is a string-prefix of a
+    sibling repo (e.g. "core/cli" vs "core/climate") does not cross-list the
+    sibling's objects. An empty prefix (bucket-root repo) stays "" so it
+    lists the whole bucket instead of the never-matching "/".
+    """
+    prefix = prefix.rstrip("/")
+    return f"{prefix}/" if prefix else ""
 
 
 BUCKET_ALIAS_TXT_PREFIX = "git-bucket="
@@ -164,6 +180,70 @@ def resolve_bucket_alias(bucket: str, remote_name: Optional[str] = None) -> str:
     return values[0]
 
 
+_bucket_region_cache: dict[str, Optional[str]] = {}
+
+
+def resolve_bucket_region(session, bucket: str) -> Optional[str]:
+    """Returns the AWS region a bucket lives in, or None if undeterminable.
+
+    HeadBucket reports the bucket's true region in the ``x-amz-bucket-region``
+    response header (and, on botocore 1.43.x, the ``BucketRegion`` output field)
+    even when the caller is unauthorized (403) or redirected (301), so region
+    detection needs no bucket permission and never has to match the caller's
+    default region. The result is cached per process keyed on bucket name
+    (region is a property of the bucket, independent of the calling identity).
+
+    On any failure to determine the region this returns None so callers proceed
+    WITHOUT pinning a region (the pre-fork default-region behavior); region
+    detection is never fatal.
+
+    Args:
+        session: the boto3 ``Session`` to build the probe client from.
+        bucket: an already alias-resolved bucket name.
+
+    Returns:
+        the bucket's region name, or None if it cannot be determined.
+    """
+    if bucket is None:
+        return None
+    if bucket in _bucket_region_cache:
+        return _bucket_region_cache[bucket]
+    region = _detect_bucket_region(session, bucket)
+    _bucket_region_cache[bucket] = region
+    return region
+
+
+def _detect_bucket_region(session, bucket: str) -> Optional[str]:
+    s3 = session.client("s3")
+    try:
+        response = s3.head_bucket(Bucket=bucket)
+        region = response.get("BucketRegion")
+        if region:
+            return region
+        headers = response.get("ResponseMetadata", {}).get("HTTPHeaders", {})
+        return headers.get("x-amz-bucket-region")
+    except s3.exceptions.ClientError as x:
+        # HeadBucket returns the region header even on a 301 redirect / 403, so
+        # an error response is still authoritative for the bucket's region.
+        headers = x.response.get("ResponseMetadata", {}).get("HTTPHeaders", {})
+        return headers.get("x-amz-bucket-region")
+    except Exception:
+        # Region detection must never be fatal; the real S3 call that follows
+        # surfaces any credential/endpoint problem with a clearer message.
+        return None
+
+
+def s3_region_kwargs(session, bucket: str) -> dict:
+    """Returns client kwargs that pin an S3 client/resource to the bucket region.
+
+    Spread into ``session.client("s3", **...)`` or ``session.resource("s3", **...)``.
+    Yields ``{"region_name": <region>}`` when the region is known, or ``{}`` when
+    it cannot be determined (leaving boto3's default region resolution in place).
+    """
+    region = resolve_bucket_region(session, bucket)
+    return {"region_name": region} if region else {}
+
+
 LFS_ALIAS_HOST = "lfs-alias.git-remote-s3.test"
 
 
@@ -177,3 +257,102 @@ def synthetic_lfs_url(bucket: str, prefix: str) -> str:
     ``.test`` TLD to guarantee non-collision with any real host.
     """
     return f"https://{LFS_ALIAS_HOST}/{bucket}/{prefix}"
+
+
+_ACCESS_GRANTS_FALLBACK_NOTICE = (
+    "git-remote-s3: S3 Access Grants unavailable; using direct S3 credentials. "
+    "If you expected Access Grants, run 'git-s3 doctor' for details."
+)
+
+_access_grants_fallback_notified = False
+
+
+def _notify_access_grants_fallback() -> None:
+    """Emits a one-time notice that Access Grants fell back to direct S3 creds.
+
+    The callers are a git remote helper and a git-lfs transfer agent whose
+    stdout carries a wire protocol; any stray stdout byte corrupts it, so the
+    notice must go to stderr (which git surfaces to the user). It is emitted at
+    most once per process to avoid one line per object/operation.
+    """
+    global _access_grants_fallback_notified
+    if _access_grants_fallback_notified:
+        return
+    _access_grants_fallback_notified = True
+    print(_ACCESS_GRANTS_FALLBACK_NOTICE, file=sys.stderr, flush=True)
+
+
+def _detect_access_grants_fallback(**kwargs) -> None:
+    """before-sign.s3 handler that fires the one-time fallback notice.
+
+    The plugin signals a successful Access Grants vend by setting
+    ``request.context['signing']['request_credentials']`` in its own
+    before-sign.s3 handler and leaves it unset on any fallback. This handler is
+    registered after the plugin's, so botocore (which invokes same-event
+    handlers in registration order) calls it once the plugin has decided; an
+    unset value means a fallback occurred. The plugin's own fallback signal is a
+    DEBUG record on the root logger, which cannot be observed without changing
+    global logging levels, so this context check is used instead.
+    """
+    request = kwargs.get("request")
+    if request is None:
+        return
+    if "request_credentials" not in request.context.get("signing", {}):
+        _notify_access_grants_fallback()
+
+
+def register_s3_access_grants(s3_client, session):
+    """Registers the AWS S3 Access Grants plugin on an S3 client and returns it.
+
+    Always registers with ``fallback_enabled=True`` so a single code path serves
+    both credential models: profiles holding only ``s3:GetDataAccess`` get
+    Access Grants vended credentials, while IAM-access-key profiles (which have
+    no grant) transparently fall back to a direct S3 call. On the first fallback
+    a one-time notice is emitted to stderr.
+
+    The plugin is handed the same profile session the S3 client was built from
+    via ``customer_session``. Without it the plugin resolves GetDataAccess (and
+    its STS/s3control preflight) against the *default* botocore session, so a
+    ``s3://profile@bucket/repo`` URL whose profile is not also the default would
+    vend grants as the wrong identity. ``session._session`` is the underlying
+    botocore Session that the plugin expects.
+
+    Args:
+        s3_client: a boto3 S3 client (or ``resource.meta.client``) built on an
+            already alias-resolved bucket name.
+        session: the boto3 ``Session`` the ``s3_client`` was created from.
+
+    Returns:
+        the same client, with the plugin and fallback detector registered.
+    """
+    plugin = S3AccessGrantsPlugin(
+        s3_client, fallback_enabled=True, customer_session=session._session
+    )
+    plugin.register()
+    s3_client.meta.events.register("before-sign.s3", _detect_access_grants_fallback)
+    return s3_client
+
+
+def register_s3_access_grants_strict(s3_client, session):
+    """Registers the plugin with fallback DISABLED, for diagnostics only.
+
+    The production helper (``register_s3_access_grants``) enables fallback so a
+    missing grant silently drops to direct credentials — that silence is exactly
+    what hides a misconfigured Access Grants path, including a failure in the
+    plugin's ``GetAccessGrantsInstanceForPrefix`` preflight (a separate IAM action
+    from ``GetDataAccess``) that it runs before vending. With fallback disabled the
+    plugin re-raises that real error, so ``git-s3 doctor`` can report it instead of
+    masking it.
+
+    Args:
+        s3_client: a boto3 S3 client built on an already alias-resolved bucket.
+        session: the boto3 ``Session`` the ``s3_client`` was created from.
+
+    Returns:
+        the same client, with the fallback-disabled plugin registered.
+    """
+    plugin = S3AccessGrantsPlugin(
+        s3_client, fallback_enabled=False, customer_session=session._session
+    )
+    plugin.register()
+    return s3_client

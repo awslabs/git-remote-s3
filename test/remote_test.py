@@ -65,7 +65,7 @@ def test_cmd_list(session_client_mock, stdout_mock):
     session_client_mock.return_value.list_objects_v2.side_effect = (
         create_list_objects_v2_mock(shas=[SHA1])
     )
-    session_client_mock.assert_called_once_with("s3")
+    session_client_mock.assert_any_call("s3")
     assert s3_remote.bucket == "test_bucket"
     assert s3_remote.prefix == "test_prefix"
     assert s3_remote.s3 == session_client_mock.return_value
@@ -97,7 +97,7 @@ def test_list_refs(session_client_mock, stdout_mock):
         ]
     }
 
-    session_client_mock.assert_called_once_with("s3")
+    session_client_mock.assert_any_call("s3")
     assert s3_remote.bucket == "test_bucket"
     assert s3_remote.prefix == "nested/test_prefix"
     assert s3_remote.s3 == session_client_mock.return_value
@@ -105,6 +105,21 @@ def test_list_refs(session_client_mock, stdout_mock):
     assert len(refs) == 2
     assert f"refs/heads/{BRANCH}/{SHA1}.bundle" in refs
     assert f"refs/tags/v1/{SHA1}.bundle" in refs
+
+
+@patch("sys.stdout", new_callable=StringIO)
+@patch("boto3.Session.client")
+def test_list_refs_empty_prefix_lists_whole_bucket(session_client_mock, stdout_mock):
+    s3_remote = S3Remote(UriScheme.S3, None, "test_bucket", "")
+
+    session_client_mock.return_value.list_objects_v2.return_value = {"Contents": []}
+
+    s3_remote.list_refs(bucket=s3_remote.bucket, prefix=s3_remote.prefix)
+
+    # Every call (the __init__ existence-check and the list_refs call above)
+    # must list Prefix="" rather than the never-matching "/".
+    for call in session_client_mock.return_value.list_objects_v2.call_args_list:
+        assert call.kwargs["Prefix"] == ""
 
 
 @patch("sys.stdout", new_callable=StringIO)
@@ -124,7 +139,7 @@ def test_cmd_list_nested_prefix(session_client_mock, stdout_mock):
             },
         ]
     }
-    session_client_mock.assert_called_once_with("s3")
+    session_client_mock.assert_any_call("s3")
     assert s3_remote.bucket == "test_bucket"
     assert s3_remote.prefix == "nested/test_prefix"
     assert s3_remote.s3 == session_client_mock.return_value
@@ -153,7 +168,7 @@ def test_cmd_list_no_head(session_client_mock, stdout_mock):
         )
 
     session_client_mock.return_value.get_object.side_effect = error
-    session_client_mock.assert_called_once_with("s3")
+    session_client_mock.assert_any_call("s3")
     assert s3_remote.bucket == "test_bucket"
     assert s3_remote.prefix == "test_prefix"
     assert s3_remote.s3 == session_client_mock.return_value
@@ -172,7 +187,7 @@ def test_cmd_list_with_head_not_exsting_ref(session_client_mock, stdout_mock):
     session_client_mock.return_value.get_object.return_value = {
         "Body": BytesIO(b"refs/heads/master")
     }
-    session_client_mock.assert_called_once_with("s3")
+    session_client_mock.assert_any_call("s3")
     assert s3_remote.bucket == "test_bucket"
     assert s3_remote.prefix == "test_prefix"
     assert s3_remote.s3 == session_client_mock.return_value
@@ -192,7 +207,7 @@ def test_cmd_list_protected_branch(session_client_mock, stdout_mock):
     session_client_mock.return_value.get_object.return_value = {
         "Body": BytesIO(b"refs/heads/%b" % str.encode(BRANCH))
     }
-    session_client_mock.assert_called_once_with("s3")
+    session_client_mock.assert_any_call("s3")
     assert s3_remote.bucket == "test_bucket"
     assert s3_remote.prefix == "test_prefix"
     assert s3_remote.s3 == session_client_mock.return_value

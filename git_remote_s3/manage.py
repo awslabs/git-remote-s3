@@ -4,7 +4,14 @@
 
 import boto3
 from .remote import parse_git_url, DEFAULT_LOCK_TTL_SECONDS
-from .common import resolve_bucket_alias, BucketAliasError
+from .common import (
+    resolve_bucket_alias,
+    register_s3_access_grants,
+    register_s3_access_grants_strict,
+    s3_region_kwargs,
+    scoped_list_prefix,
+    BucketAliasError,
+)
 import argparse
 import sys
 import uuid
@@ -19,16 +26,47 @@ from .git import get_remote_url, GitError
 import datetime
 
 
+_ACCESS_GRANTS_HINTS = {
+    "GetAccessGrantsInstanceForPrefix": (
+        "caller role is missing s3:GetAccessGrantsInstanceForPrefix"
+    ),
+    "GetDataAccess": (
+        "caller role is missing s3:GetDataAccess or has no matching grant"
+    ),
+}
+
+
+def _access_grants_hint(operation, code):
+    """Maps an (operation, error code) to an actionable IAM hint, or None."""
+    if code != "AccessDenied":
+        return None
+    return _ACCESS_GRANTS_HINTS.get(operation)
+
+
 class Doctor:
-    def __init__(self, profile, bucket, prefix, delete_bundle, lock_ttl_seconds=60, delete_stale_locks=False) -> None:
+    def __init__(
+        self,
+        profile,
+        bucket,
+        prefix,
+        delete_bundle,
+        lock_ttl_seconds=60,
+        delete_stale_locks=False,
+    ) -> None:
         self.bucket = bucket
         self.prefix = prefix
         self.delete_bundle = delete_bundle
-        self.s3 = boto3.Session(profile_name=profile).client("s3")
+        self.profile = profile
+        self.session = boto3.Session(profile_name=profile)
+        self.s3 = register_s3_access_grants(
+            self.session.client("s3", **s3_region_kwargs(self.session, bucket)),
+            self.session,
+        )
         self.lock_ttl_seconds = lock_ttl_seconds
         self.delete_stale_locks = delete_stale_locks
 
     def run(self):
+        self.check_access_grants()
         repos = self.analyze_repo()
         for r in repos.keys():
             print(f"{r}:")
@@ -46,6 +84,51 @@ class Doctor:
 
         self.fix_issues(repos)
 
+    def check_access_grants(self):
+        """Diagnoses the S3 Access Grants path and names any missing permission.
+
+        The production S3 client registers the plugin with fallback enabled, so a
+        broken Access Grants setup silently drops to direct credentials. This probe
+        registers a SEPARATE, fallback-disabled plugin and drives the full vend
+        path (including the ``GetAccessGrantsInstanceForPrefix`` preflight) against
+        the repo prefix, surfacing the real error rather than masking it.
+
+        This is informational: an IAM-access-key caller with no grant will
+        legitimately report "not available" and keep using direct credentials.
+        """
+        print("\nChecking S3 Access Grants entitlement...")
+        probe = register_s3_access_grants_strict(
+            self.session.client("s3", **s3_region_kwargs(self.session, self.bucket)),
+            self.session,
+        )
+        # Scoped to exactly this repo, matching the S3Remote listing path (see
+        # scoped_list_prefix): a bare prefix would also match a sibling repo.
+        scoped_prefix = scoped_list_prefix(self.prefix)
+        try:
+            probe.list_objects_v2(Bucket=self.bucket, Prefix=scoped_prefix)
+        except probe.exceptions.ClientError as x:
+            operation = getattr(x, "operation_name", None) or "S3 request"
+            error = x.response.get("Error", {})
+            code = error.get("Code", "Unknown")
+            message = error.get("Message", "")
+            hint = _access_grants_hint(operation, code)
+            if code == "AccessDenied":
+                print(" Access Grants: not available (using direct S3 credentials)")
+            else:
+                print(" Access Grants: ERROR")
+            print(f"  {operation} failed: {code}")
+            if hint:
+                print(f"  hint: {hint}")
+            elif message:
+                print(f"  {message}")
+        except Exception as x:  # a failed diagnostic must not abort the doctor run
+            print(f" Access Grants: could not be checked ({x})")
+        else:
+            print(
+                f" Access Grants: OK "
+                f"(vended credentials for s3://{self.bucket}/{scoped_prefix})"
+            )
+
     def fix_issues(self, repos):
         for r in repos.keys():
             for ref in repos[r]["refs"].keys():
@@ -61,7 +144,7 @@ class Doctor:
     def list_and_handle_stale_locks(self):
         print("\nScanning for stale locks...")
         objs = self.s3.list_objects_v2(
-            Bucket=self.bucket, Prefix=self.prefix + "/"
+            Bucket=self.bucket, Prefix=scoped_list_prefix(self.prefix)
         ).get("Contents", [])
 
         now = datetime.datetime.now(tz=datetime.timezone.utc)
@@ -96,7 +179,7 @@ class Doctor:
 
     def analyze_repo(self):
         objs = self.s3.list_objects_v2(
-            Bucket=self.bucket, Prefix=self.prefix + "/"
+            Bucket=self.bucket, Prefix=scoped_list_prefix(self.prefix)
         ).get("Contents", [])
 
         repos = {}
@@ -192,7 +275,10 @@ class ManageBranch:
     def __init__(self, profile, bucket, prefix, branch) -> None:
         self.bucket = bucket
         self.prefix = prefix
-        self.s3 = boto3.Session(profile_name=profile).client("s3")
+        session = boto3.Session(profile_name=profile)
+        self.s3 = register_s3_access_grants(
+            session.client("s3", **s3_region_kwargs(session, bucket)), session
+        )
         self.branch = branch
         if not self.get_branch_content():
             raise ValueError(f"Branch {self.branch} does not exist")
@@ -259,10 +345,13 @@ def main():  # noqa: C901
         action="store_true",
         help="Delete stale lock files found during doctor run",
     )
+    # Optional: "doctor" doesn't take a branch; delete-branch/protect/unprotect
+    # validate it's present themselves (see the args.branch is None check below).
     parser.add_argument(
         "branch",
         type=str,
-        action="store",
+        nargs="?",
+        default=None,
         help="Branch to delete from the remote",
     )
     args = parser.parse_args()
