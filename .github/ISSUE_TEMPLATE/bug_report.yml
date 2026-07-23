@@ -1,0 +1,54 @@
+name: Bug report
+description: Report a problem with git-remote-s3, git-lfs-s3, or git-s3
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report. Please fill in as much detail as you can —
+        incomplete reports are harder to act on and may be closed.
+  - type: input
+    id: version
+    attributes:
+      label: Package version
+      description: Output of `pip show fduplex-git-remote-s3`
+      placeholder: e.g. 0.4.0
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python version, git version
+      placeholder: e.g. macOS 14, Python 3.12, git 2.45
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: A minimal, reproducible series of commands or steps
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include full error output / stack trace if applicable
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing open and closed issues and didn't find a duplicate
+          required: true
+        - label: This is not a security vulnerability (if it is, see SECURITY.md instead)
+          required: true
