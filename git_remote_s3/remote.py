@@ -282,6 +282,8 @@ class S3Remote:
         pre_lock_bundle = contents[0]["Key"] if len(contents) == 1 else None
         sha: str | None = None
         lock_key: str | None = None
+        result: str | None = None
+        lock_release_error: str | None = None
         try:
             sha = git.rev_parse(local_ref)
             if pre_lock_bundle:
@@ -352,7 +354,7 @@ class S3Remote:
                     f"pushed {temp_file_archive} to " + "{self.prefix}/{remote_ref}/repo.zip with message {commit_msg}"
                 )
 
-            return f"ok {remote_ref}\n"
+            result = f"ok {remote_ref}\n"
         except git.GitError:
             logger.info(f"fatal: {local_ref} not found\n")
             return f'error {remote_ref} "{local_ref} not found"?\n'
@@ -368,13 +370,15 @@ class S3Remote:
                     self.release_lock(remote_ref, lock_key)
                 except Exception as e:
                     logger.info(f"failed to release lock {lock_key} for {remote_ref}: {e}")
-                    return (
+                    lock_release_error = (
                         f'error {remote_ref} "failed to release lock. You may need to '
                         f"manually remove the lock {lock_key} from the server or use "
                         f'git-s3 doctor to fix."?\n'
                     )
             if sha and os.path.exists(f"{temp_dir}/{sha}.bundle"):
                 os.remove(f"{temp_dir}/{sha}.bundle")
+
+        return lock_release_error if lock_release_error else result
 
     def init_remote_head(self, ref: str) -> None:
         """Initialise the remote HEAD reference if it does not exist
