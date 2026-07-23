@@ -182,6 +182,12 @@ The remote HEAD is set to track the branch that has been pushed first to the rem
 
 When you use `s3+zip://` instead of `s3://`, an additional zip archive named `repo.zip` is uploaded next to the `sha.bundle` file. This is for example useful if you want to use the Repo as a S3 Source for AWS CodePipeline, which expects a `.zip` file. The path on S3 when you push to the `main` branch is for example `refs/heads/main/repo.zip`. See [How S3 remote work](#how-s3-remote-work) for more details about the bundle file.
 
+The `s3+zip://` transport is still fully supported. However, because PyPI does not permit the `+` character in an
+installed command name, the `git-remote-s3+zip` helper is no longer installed automatically. If you use `s3+zip://`
+remotes, create the helper once as an alias of the `s3` helper, e.g.
+`ln -s "$(command -v git-remote-s3)" ~/.local/bin/git-remote-s3+zip` (or copy it to a directory on your `PATH` on
+Windows).
+
 ### Clone a repo
 
 To clone the repo to another folder just use the normal git syntax using the s3 URI as remote:
