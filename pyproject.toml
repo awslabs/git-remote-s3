@@ -15,7 +15,8 @@ dependencies = [
     "boto3 (>=1.42.24,<2.0.0)",
     "botocore (>=1.42.24,<2.0.0)",
     "urllib3 (>=2.6.3,<3.0.0)",
-    "dnspython (>=2.7.0,<3.0.0)"
+    "dnspython (>=2.7.0,<3.0.0)",
+    "aws-s3-access-grants-boto3-plugin (>=1.3.0,<2.0.0)"
 ]
 
 [project.scripts]

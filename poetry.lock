@@ -21,6 +21,22 @@ tests = ["cloudpickle ; platform_python_implementation == \"CPython\"", "hypothe
 tests-mypy = ["mypy (>=1.11.1) ; platform_python_implementation == \"CPython\" and python_version >= \"3.9\"", "pytest-mypy-plugins ; platform_python_implementation == \"CPython\" and python_version >= \"3.9\" and python_version < \"3.13\""]
 
 [[package]]
+name = "aws-s3-access-grants-boto3-plugin"
+version = "1.3.0"
+description = "AWS S3 Access Grants plugin provides the functionality to enable S3 customers to configure S3 Access Grants as a permission layer on top of the S3 Clients."
+optional = false
+python-versions = ">=3.9"
+groups = ["main"]
+files = [
+    {file = "aws_s3_access_grants_boto3_plugin-1.3.0-py3-none-any.whl", hash = "sha256:0aaf009d98b91bd28822ca7773f35ca55e911177d43fc44b72a5f213e99c8382"},
+    {file = "aws_s3_access_grants_boto3_plugin-1.3.0.tar.gz", hash = "sha256:83fab0f08dd5c1a0508a4df1a43ada1128a51b4f7fb12c8c1e1650089e029940"},
+]
+
+[package.dependencies]
+botocore = ">=1.39.9"
+cacheout = ">=0.16.0"
+
+[[package]]
 name = "black"
 version = "26.3.1"
 description = "The uncompromising code formatter."
@@ -112,6 +128,21 @@ urllib3 = {version = ">=1.25.4,<2.2.0 || >2.2.0,<3", markers = "python_version >
 
 [package.extras]
 crt = ["awscrt (==0.29.2)"]
+
+[[package]]
+name = "cacheout"
+version = "0.16.0"
+description = "A caching library for Python"
+optional = false
+python-versions = ">=3.7"
+groups = ["main"]
+files = [
+    {file = "cacheout-0.16.0-py3-none-any.whl", hash = "sha256:1a52d9aa8b1e9720d8453b061348f15795578231f9ec4ad376fec49e717d0ed8"},
+    {file = "cacheout-0.16.0.tar.gz", hash = "sha256:ee264897cbaa089ae5f406da11952697d99fa7f3583cfab69fe8a00ff8e1952d"},
+]
+
+[package.extras]
+dev = ["black", "build", "coverage", "docformatter", "flake8", "flake8-black", "flake8-bugbear", "flake8-isort", "furo", "importlib-metadata (<5) ; python_version == \"3.7\"", "invoke", "isort", "mypy", "pylint", "pytest", "pytest-asyncio", "pytest-cov", "sphinx", "sphinx-autodoc-typehints", "tox", "twine", "wheel"]
 
 [[package]]
 name = "click"
@@ -668,4 +699,4 @@ zstd = ["backports-zstd (>=1.0.0) ; python_version < \"3.14\""]
 [metadata]
 lock-version = "2.1"
 python-versions = ">= 3.10"
-content-hash = "18a64d8ee13db4859d0948d48301f980912a49031044b58bad425c3f29d63b77"
+content-hash = "a11f85c9f20301883d0bef5d33c8fe862c4812265b6064513eab38d62e3a5e38"

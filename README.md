@@ -17,6 +17,7 @@ It also provide an implementation of the [git-lfs custom transfer](https://githu
   - [Create a new repo](#create-a-new-repo)
   - [Clone a repo](#clone-a-repo)
   - [DNS bucket aliases](#dns-bucket-aliases)
+  - [S3 Access Grants](#s3-access-grants)
   - [Branches, etc.](#branches-etc)
   - [Using S3 remotes for submodules](#using-s3-remotes-for-submodules)
 - [Repo as S3 Source for AWS CodePipeline](#repo-as-s3-source-for-aws-codepipeline)
@@ -206,6 +207,39 @@ git config s3.dns-alias false
 ```
 
 Both keys are booleans; setting the per-remote key to `true` re-enables aliasing for that remote even when `s3.dns-alias` is `false`. The per-remote key applies where a remote name is available (the git remote helper, the LFS transfer agent, `git-lfs-s3 install --remote`); the `git-s3` CLI takes a URI rather than a remote name and honors only `s3.dns-alias`.
+
+### S3 Access Grants
+
+> **Fork addition** (not in upstream awslabs/git-remote-s3): the [AWS S3 Access Grants boto3 plugin](https://github.com/awslabs/aws-s3-access-grants-plugin-boto3) is bundled and auto-registered on every S3 client this tool builds — the git remote helper, the `git-lfs-s3` transfer agent, and the `git-s3` management CLI.
+
+Registration is transparent and always runs with fallback enabled, so a single code path serves both credential models:
+
+- A caller whose identity holds an S3 Access Grant gets short-lived, prefix-scoped credentials vended by Access Grants for each S3 operation.
+- A caller using plain IAM credentials (an access-key user or a role with direct S3 policy access and no grant) transparently falls back to a direct S3 call — no configuration needed.
+
+On the first fallback in a process a one-time notice is printed to stderr; it points you at `git-s3 doctor` (below) if you *expected* Access Grants to be used.
+
+#### IAM permissions for the Access Grants path
+
+To use Access Grants, the caller role/identity needs **both** of these actions on the Access Grants instance resource:
+
+- `s3:GetDataAccess` — vends the scoped credentials.
+- `s3:GetAccessGrantsInstanceForPrefix` — resolves which account owns the Access Grants instance for the requested `s3://bucket/prefix`.
+
+The plugin calls `GetAccessGrantsInstanceForPrefix` **before** it can call `GetDataAccess`, because it must first learn the owner account id to target. This is a separate IAM action that is easy to overlook: if the caller has `s3:GetDataAccess` but not `s3:GetAccessGrantsInstanceForPrefix`, the plugin fails during that preflight and — because fallback is enabled — **silently** drops to direct S3 credentials. The user then sees only a misleading downstream `AccessDenied` from the direct call (or a successful direct call that never used Access Grants at all), with nothing pointing at the real cause. Grant both actions together.
+
+#### Diagnosing with `git-s3 doctor`
+
+`git-s3 doctor <remote>` runs an Access Grants entitlement check as its own section. Unlike the normal path, this check runs the plugin with fallback **disabled** and drives the full vend path (including the `GetAccessGrantsInstanceForPrefix` preflight) against the repo's prefix, so it surfaces the real error the fallback would otherwise hide. It reports:
+
+- `Access Grants: OK` when credentials were vended for the repo prefix.
+- `Access Grants: not available (using direct S3 credentials)` on an `AccessDenied`, naming the exact failing operation and the missing permission — e.g. `caller role is missing s3:GetAccessGrantsInstanceForPrefix` or `caller role is missing s3:GetDataAccess or has no matching grant`.
+
+This is informational: an IAM-key user with no grant legitimately reports "not available" and keeps working via direct credentials — that is expected, not an error.
+
+#### Bucket region auto-detection
+
+The S3 client is automatically pinned to the bucket's real region, detected via a `HeadBucket` probe (which returns the region even for an unauthorized caller, so it needs no extra permission and is cached per process). You do **not** need your default region to match the bucket's region; if the region cannot be determined the tool proceeds with your default region and S3's cross-region redirects, exactly as before.
 
 ### Branches, etc.
 

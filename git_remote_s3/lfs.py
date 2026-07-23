@@ -13,6 +13,8 @@ from typing import Optional
 from .common import (
     parse_git_url,
     resolve_bucket_alias,
+    register_s3_access_grants,
+    s3_region_kwargs,
     synthetic_lfs_url,
     BucketAliasError,
 )
@@ -110,7 +112,10 @@ class LFSProcess:
             session = boto3.Session()
         else:
             session = boto3.Session(profile_name=self.profile)
-        s3 = session.resource("s3")
+        s3 = session.resource("s3", **s3_region_kwargs(session, self.bucket))
+        # Bucket operations flow through the resource's underlying client, so the
+        # plugin is registered there.
+        register_s3_access_grants(s3.meta.client, session)
         self.s3_bucket = s3.Bucket(self.bucket)
 
     def upload(self, event: dict):
