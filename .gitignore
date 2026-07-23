@@ -4,3 +4,4 @@
 __pychache__
 *.tar.gz
 .DS_Store
+dist/

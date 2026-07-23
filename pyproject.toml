@@ -2,7 +2,7 @@
 name = "fduplex-git-remote-s3"
 version = "0.4.0"
 description = "A git remote helper for Amazon S3"
-authors = [{ "email" =  "Massimiliano Angelino <angmas@amazon.com>"}, { "email" = "FullDuplex Media <contact@fullduplex.media>" } ]
+authors = [{ name = "FullDuplex Media", email = "contact@fullduplex.media" }]
 repository = "https://github.com/fduplex/git-remote-s3"
 classifiers = [
     "Topic :: Software Development :: Version Control", 
@@ -25,7 +25,8 @@ git-remote-s3 = "git_remote_s3.remote:main"
 git-lfs-s3 = "git_remote_s3.lfs:main"
 git-s3 = "git_remote_s3.manage:main"
 
-
+[tool.poetry]
+packages = [{ include = "git_remote_s3" }]
 
 [tool.poetry.group.dev.dependencies]
 flake8 = "^7.1.1"
