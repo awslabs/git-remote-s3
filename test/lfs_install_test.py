@@ -10,7 +10,7 @@ from git_remote_s3.common import synthetic_lfs_url, LFS_ALIAS_HOST
 
 
 def _git(args, cwd):
-    res = subprocess.run(args, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    res = subprocess.run(args, cwd=cwd, capture_output=True)
     assert res.returncode == 0, res.stderr.decode()
     return res.stdout.decode().strip()
 
@@ -19,8 +19,7 @@ def _git_config_get_all(key, cwd):
     res = subprocess.run(
         ["git", "config", "--get-all", key],
         cwd=cwd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
     )
     if res.returncode != 0:
         return []
@@ -37,10 +36,7 @@ def repo(tmp_path, monkeypatch):
 
 
 def test_synthetic_lfs_url_is_deterministic():
-    assert (
-        synthetic_lfs_url("my-bucket", "path/to/repo")
-        == f"https://{LFS_ALIAS_HOST}/my-bucket/path/to/repo"
-    )
+    assert synthetic_lfs_url("my-bucket", "path/to/repo") == f"https://{LFS_ALIAS_HOST}/my-bucket/path/to/repo"
 
 
 def test_synthetic_lfs_url_uses_reserved_tld():
@@ -52,9 +48,7 @@ def test_install_bare_one_remote_writes_unscoped_config(repo, capsys):
 
     lfs.install()
 
-    assert _git_config_get_all("lfs.customtransfer.git-lfs-s3.path", repo) == [
-        "git-lfs-s3"
-    ]
+    assert _git_config_get_all("lfs.customtransfer.git-lfs-s3.path", repo) == ["git-lfs-s3"]
     assert _git_config_get_all("lfs.standalonetransferagent", repo) == ["git-lfs-s3"]
     captured = capsys.readouterr()
     assert "git-lfs-s3 installed" in captured.out
@@ -102,12 +96,8 @@ def test_install_remote_s3_writes_scoped_config(repo, capsys):
     lfs.install(remote_name="s3")
 
     assert _git_config_get_all("remote.s3.lfsurl", repo) == [expected_url]
-    assert _git_config_get_all(f"lfs.{expected_url}.standalonetransferagent", repo) == [
-        "git-lfs-s3"
-    ]
-    assert _git_config_get_all("lfs.customtransfer.git-lfs-s3.path", repo) == [
-        "git-lfs-s3"
-    ]
+    assert _git_config_get_all(f"lfs.{expected_url}.standalonetransferagent", repo) == ["git-lfs-s3"]
+    assert _git_config_get_all("lfs.customtransfer.git-lfs-s3.path", repo) == ["git-lfs-s3"]
     assert _git_config_get_all("lfs.standalonetransferagent", repo) == []
     captured = capsys.readouterr()
     assert "installed for remote 's3'" in captured.out
@@ -121,9 +111,7 @@ def test_install_remote_s3_zip_writes_scoped_config(repo):
     lfs.install(remote_name="s3")
 
     assert _git_config_get_all("remote.s3.lfsurl", repo) == [expected_url]
-    assert _git_config_get_all(f"lfs.{expected_url}.standalonetransferagent", repo) == [
-        "git-lfs-s3"
-    ]
+    assert _git_config_get_all(f"lfs.{expected_url}.standalonetransferagent", repo) == ["git-lfs-s3"]
 
 
 def test_install_remote_is_idempotent(repo):
@@ -134,12 +122,8 @@ def test_install_remote_is_idempotent(repo):
 
     expected_url = synthetic_lfs_url("bucket", "repo")
     assert _git_config_get_all("remote.s3.lfsurl", repo) == [expected_url]
-    assert _git_config_get_all(f"lfs.{expected_url}.standalonetransferagent", repo) == [
-        "git-lfs-s3"
-    ]
-    assert _git_config_get_all("lfs.customtransfer.git-lfs-s3.path", repo) == [
-        "git-lfs-s3"
-    ]
+    assert _git_config_get_all(f"lfs.{expected_url}.standalonetransferagent", repo) == ["git-lfs-s3"]
+    assert _git_config_get_all("lfs.customtransfer.git-lfs-s3.path", repo) == ["git-lfs-s3"]
 
 
 def test_install_remote_refuses_to_overwrite_existing_lfsurl(repo, capsys):
@@ -160,9 +144,7 @@ def test_install_remote_refuses_to_overwrite_existing_lfsurl(repo, capsys):
     captured = capsys.readouterr()
     assert "already set" in captured.err
     assert "https://real-lfs.example.com/foo" in captured.err
-    assert _git_config_get_all("remote.s3.lfsurl", repo) == [
-        "https://real-lfs.example.com/foo"
-    ]
+    assert _git_config_get_all("remote.s3.lfsurl", repo) == ["https://real-lfs.example.com/foo"]
 
 
 def test_install_remote_warns_on_existing_unscoped_agent(repo, capsys):
@@ -178,6 +160,4 @@ def test_install_remote_warns_on_existing_unscoped_agent(repo, capsys):
     assert "warning" in captured.err.lower()
     assert "lfs.standalonetransferagent" in captured.err
     expected_url = synthetic_lfs_url("bucket", "repo")
-    assert _git_config_get_all(f"lfs.{expected_url}.standalonetransferagent", repo) == [
-        "git-lfs-s3"
-    ]
+    assert _git_config_get_all(f"lfs.{expected_url}.standalonetransferagent", repo) == ["git-lfs-s3"]

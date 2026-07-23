@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 from botocore.exceptions import ClientError
-from mock import MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 from git_remote_s3 import S3Remote, UriScheme
 from git_remote_s3 import common
@@ -42,13 +42,9 @@ def test_register_s3_access_grants_registers_plugin_with_fallback(plugin_cls):
     returned = register_s3_access_grants(client, session)
 
     assert returned is client
-    plugin_cls.assert_called_once_with(
-        client, fallback_enabled=True, customer_session=session._session
-    )
+    plugin_cls.assert_called_once_with(client, fallback_enabled=True, customer_session=session._session)
     plugin_cls.return_value.register.assert_called_once_with()
-    client.meta.events.register.assert_called_once_with(
-        "before-sign.s3", _detect_access_grants_fallback
-    )
+    client.meta.events.register.assert_called_once_with("before-sign.s3", _detect_access_grants_fallback)
 
 
 @patch("git_remote_s3.common.S3AccessGrantsPlugin")
@@ -59,12 +55,8 @@ def test_s3remote_registers_plugin_on_its_client(session_cls, plugin_cls):
 
     S3Remote(UriScheme.S3, None, "test_bucket", "test_prefix")
 
-    plugin_cls.assert_called_once_with(
-        client, fallback_enabled=True, customer_session=session._session
-    )
-    client.meta.events.register.assert_called_once_with(
-        "before-sign.s3", _detect_access_grants_fallback
-    )
+    plugin_cls.assert_called_once_with(client, fallback_enabled=True, customer_session=session._session)
+    client.meta.events.register.assert_called_once_with("before-sign.s3", _detect_access_grants_fallback)
 
 
 @patch("git_remote_s3.common.S3AccessGrantsPlugin")
@@ -77,9 +69,7 @@ def test_s3remote_auth_probe_uses_trailing_slash_prefix(session_cls, plugin_cls)
 
     S3Remote(UriScheme.S3, None, "test_bucket", "test_prefix")
 
-    client.list_objects_v2.assert_called_once_with(
-        Bucket="test_bucket", Prefix="test_prefix/"
-    )
+    client.list_objects_v2.assert_called_once_with(Bucket="test_bucket", Prefix="test_prefix/")
 
 
 @patch("git_remote_s3.common.S3AccessGrantsPlugin")
@@ -164,18 +154,14 @@ def test_resolve_bucket_region_from_head_bucket_response():
 
 def test_resolve_bucket_region_from_success_response_header():
     session = _session_with_head(
-        head_return={
-            "ResponseMetadata": {"HTTPHeaders": {"x-amz-bucket-region": "ap-south-1"}}
-        }
+        head_return={"ResponseMetadata": {"HTTPHeaders": {"x-amz-bucket-region": "ap-south-1"}}}
     )
 
     assert resolve_bucket_region(session, "bucket") == "ap-south-1"
 
 
 def test_resolve_bucket_region_from_client_error_header():
-    err = _client_error(
-        "403", "HeadBucket", headers={"x-amz-bucket-region": "us-west-2"}
-    )
+    err = _client_error("403", "HeadBucket", headers={"x-amz-bucket-region": "us-west-2"})
     session = _session_with_head(head_error=err)
 
     assert resolve_bucket_region(session, "bucket") == "us-west-2"
@@ -243,9 +229,7 @@ def _probe_raising(error):
 
 
 def test_doctor_maps_access_denied_on_instance_for_prefix(capsys):
-    probe = _probe_raising(
-        _client_error("AccessDenied", "GetAccessGrantsInstanceForPrefix")
-    )
+    probe = _probe_raising(_client_error("AccessDenied", "GetAccessGrantsInstanceForPrefix"))
 
     _doctor_with_probe(probe)
 

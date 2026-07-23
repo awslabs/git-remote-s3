@@ -17,6 +17,7 @@ from .common import (
 import argparse
 import sys
 import uuid
+from typing import Any
 from botocore.exceptions import (
     ClientError,
     ProfileNotFound,
@@ -29,12 +30,8 @@ import datetime
 
 
 _ACCESS_GRANTS_HINTS = {
-    "GetAccessGrantsInstanceForPrefix": (
-        "caller role is missing s3:GetAccessGrantsInstanceForPrefix"
-    ),
-    "GetDataAccess": (
-        "caller role is missing s3:GetDataAccess or has no matching grant"
-    ),
+    "GetAccessGrantsInstanceForPrefix": ("caller role is missing s3:GetAccessGrantsInstanceForPrefix"),
+    "GetDataAccess": ("caller role is missing s3:GetDataAccess or has no matching grant"),
 }
 
 
@@ -70,10 +67,10 @@ class Doctor:
     def run(self):
         self.check_access_grants()
         repos = self.analyze_repo()
-        for r in repos.keys():
+        for r in repos:
             print(f"{r}:")
             head_ref = "Invalid"
-            for ref in repos[r]["refs"].keys():
+            for ref in repos[r]["refs"]:
                 if repos[r]["HEAD"] == ref:
                     head_ref = ref
                 ref_value = repos[r]["refs"][ref]
@@ -126,14 +123,11 @@ class Doctor:
         except Exception as x:  # a failed diagnostic must not abort the doctor run
             print(f" Access Grants: could not be checked ({x})")
         else:
-            print(
-                f" Access Grants: OK "
-                f"(vended credentials for s3://{self.bucket}/{scoped_prefix})"
-            )
+            print(f" Access Grants: OK (vended credentials for s3://{self.bucket}/{scoped_prefix})")
 
     def fix_issues(self, repos):
-        for r in repos.keys():
-            for ref in repos[r]["refs"].keys():
+        for r in repos:
+            for ref in repos[r]["refs"]:
                 if len(repos[r]["refs"][ref]["bundles"]) > 1:
                     self.fix_multiple_bundles(repos, r, ref)
 
@@ -145,9 +139,7 @@ class Doctor:
 
     def list_and_handle_stale_locks(self):
         print("\nScanning for stale locks...")
-        objs = self.s3.list_objects_v2(
-            Bucket=self.bucket, Prefix=scoped_list_prefix(self.prefix)
-        ).get("Contents", [])
+        objs = self.s3.list_objects_v2(Bucket=self.bucket, Prefix=scoped_list_prefix(self.prefix)).get("Contents", [])
 
         now = datetime.datetime.now(tz=datetime.timezone.utc)
         stale = []
@@ -180,11 +172,9 @@ class Doctor:
             print("\nRun with --delete-stale-locks to remove them automatically.")
 
     def analyze_repo(self):
-        objs = self.s3.list_objects_v2(
-            Bucket=self.bucket, Prefix=scoped_list_prefix(self.prefix)
-        ).get("Contents", [])
+        objs = self.s3.list_objects_v2(Bucket=self.bucket, Prefix=scoped_list_prefix(self.prefix)).get("Contents", [])
 
-        repos = {}
+        repos: dict[str, Any] = {}
         for o in objs:
             key = o["Key"]
             key_parts = key.split("/")
@@ -193,24 +183,16 @@ class Doctor:
                 repos[repo_name] = {"refs": {}, "HEAD": "Missing"}
             refs = "/".join(key_parts[1:-1])
             if key_parts[1] == "HEAD":
-                head_ref = (
-                    self.s3.get_object(Bucket=self.bucket, Key=key)
-                    .get("Body")
-                    .read()
-                    .decode("utf-8")
-                    .strip()
-                )
+                head_ref = self.s3.get_object(Bucket=self.bucket, Key=key).get("Body").read().decode("utf-8").strip()
                 repos[repo_name]["HEAD"] = head_ref
                 continue
             if not repos[repo_name]["refs"].get(refs, None):
                 repos[repo_name]["refs"][refs] = {"protected": False, "bundles": []}
-            if "PROTECTED#" == key_parts[-1]:
+            if key_parts[-1] == "PROTECTED#":
                 repos[repo_name]["refs"][refs]["protected"] = True
             else:
                 sha = key_parts[-1].split(".")[0]
-                repos[repo_name]["refs"][refs]["bundles"].append(
-                    {"sha": sha, "lastModified": o["LastModified"]}
-                )
+                repos[repo_name]["refs"][refs]["bundles"].append({"sha": sha, "lastModified": o["LastModified"]})
         return repos
 
     def fix_multiple_bundles(self, repos: dict, r: str, ref: str) -> None:
@@ -254,7 +236,7 @@ class Doctor:
 
     def fix_head(self, repos: dict, r: str) -> None:
         print(f"\nFix invalid HEAD for repo {r}")
-        heads = [k for k in repos[r]["refs"].keys() if "heads" in k]
+        heads = [k for k in repos[r]["refs"] if "heads" in k]
         for i, head in enumerate(heads):
             print(f"{i + 1}. {head.split('/')[-1]}")
         while True:
@@ -278,9 +260,7 @@ class ManageBranch:
         self.bucket = bucket
         self.prefix = prefix
         session = boto3.Session(profile_name=profile)
-        self.s3 = register_s3_access_grants(
-            session.client("s3", **s3_region_kwargs(session, bucket)), session
-        )
+        self.s3 = register_s3_access_grants(session.client("s3", **s3_region_kwargs(session, bucket)), session)
         self.branch = branch
         if not self.get_branch_content():
             raise ValueError(f"Branch {self.branch} does not exist")
@@ -303,10 +283,10 @@ class ManageBranch:
         else:
             print("Aborted")
 
-    def get_branch_content(self) -> list[str]:
-        objs = self.s3.list_objects_v2(
-            Bucket=self.bucket, Prefix=f"{self.prefix}/refs/heads/{self.branch}/"
-        ).get("Contents", [])
+    def get_branch_content(self) -> list[dict]:
+        objs = self.s3.list_objects_v2(Bucket=self.bucket, Prefix=f"{self.prefix}/refs/heads/{self.branch}/").get(
+            "Contents", []
+        )
         return objs
 
     def protect_branch(self):
@@ -327,9 +307,7 @@ class ManageBranch:
 def main():  # noqa: C901
     parser = argparse.ArgumentParser()
     parser.add_argument("command")
-    parser.add_argument(
-        "remote", help="The remote s3 uri to analyze, including the AWS profile if used"
-    )
+    parser.add_argument("remote", help="The remote s3 uri to analyze, including the AWS profile if used")
     parser.add_argument(
         "-d",
         "--delete-bundle",
@@ -383,11 +361,7 @@ def main():  # noqa: C901
                 args.delete_stale_locks,
             )
             doctor.run()
-        if (
-            args.command == "delete-branch"
-            or args.command == "protect"
-            or args.command == "unprotect"
-        ):
+        if args.command == "delete-branch" or args.command == "protect" or args.command == "unprotect":
             if args.branch is None:
                 sys.stderr.write("fatal: --branch is required\n")
                 sys.stderr.flush()

@@ -1,4 +1,4 @@
-from mock import patch
+from unittest.mock import patch
 from io import BytesIO
 from git_remote_s3 import S3Remote, UriScheme
 
@@ -28,9 +28,7 @@ def test_process_fetch_cmds_empty_list(session_client_mock):
 def test_process_fetch_cmds_single_command(session_client_mock, unbundle_mock):
     """Test processing a single fetch command"""
     s3_remote = S3Remote(UriScheme.S3, None, "test_bucket", "test_prefix")
-    session_client_mock.return_value.get_object.return_value = {
-        "Body": BytesIO(MOCK_BUNDLE_CONTENT)
-    }
+    session_client_mock.return_value.get_object.return_value = {"Body": BytesIO(MOCK_BUNDLE_CONTENT)}
 
     # Process a single fetch command
     s3_remote.process_fetch_cmds([f"fetch {SHA1} refs/heads/{BRANCH}"])
@@ -48,9 +46,7 @@ def test_process_fetch_cmds_single_command(session_client_mock, unbundle_mock):
 def test_process_fetch_cmds_multiple_commands(session_client_mock, unbundle_mock):
     """Test processing multiple fetch commands in parallel"""
     s3_remote = S3Remote(UriScheme.S3, None, "test_bucket", "test_prefix")
-    session_client_mock.return_value.get_object.return_value = {
-        "Body": BytesIO(MOCK_BUNDLE_CONTENT)
-    }
+    session_client_mock.return_value.get_object.return_value = {"Body": BytesIO(MOCK_BUNDLE_CONTENT)}
 
     # Process multiple fetch commands
     fetch_cmds = [
@@ -78,9 +74,7 @@ def test_process_fetch_cmds_uses_thread_pool(session_client_mock, unbundle_mock)
     # multiple commands are processed in parallel
 
     s3_remote = S3Remote(UriScheme.S3, None, "test_bucket", "test_prefix")
-    session_client_mock.return_value.get_object.return_value = {
-        "Body": BytesIO(MOCK_BUNDLE_CONTENT)
-    }
+    session_client_mock.return_value.get_object.return_value = {"Body": BytesIO(MOCK_BUNDLE_CONTENT)}
 
     # Create fetch commands
     fetch_cmds = [
@@ -108,9 +102,7 @@ def test_process_fetch_cmds_uses_thread_pool(session_client_mock, unbundle_mock)
 def test_process_cmd_batch_processing(session_client_mock, unbundle_mock, stdin_mock):
     """Test that fetch commands are collected and processed in batch"""
     s3_remote = S3Remote(UriScheme.S3, None, "test_bucket", "test_prefix")
-    session_client_mock.return_value.get_object.return_value = {
-        "Body": BytesIO(MOCK_BUNDLE_CONTENT)
-    }
+    session_client_mock.return_value.get_object.return_value = {"Body": BytesIO(MOCK_BUNDLE_CONTENT)}
 
     # Simulate processing multiple fetch commands followed by an empty line
     s3_remote.process_cmd(f"fetch {SHA1} refs/heads/{BRANCH}")
@@ -138,9 +130,7 @@ def test_process_cmd_batch_processing(session_client_mock, unbundle_mock, stdin_
 def test_thread_safety_of_fetched_refs(session_client_mock, unbundle_mock):
     """Test thread safety of the fetched_refs list using a real thread pool"""
     s3_remote = S3Remote(UriScheme.S3, None, "test_bucket", "test_prefix")
-    session_client_mock.return_value.get_object.return_value = {
-        "Body": BytesIO(MOCK_BUNDLE_CONTENT)
-    }
+    session_client_mock.return_value.get_object.return_value = {"Body": BytesIO(MOCK_BUNDLE_CONTENT)}
 
     # Create multiple fetch commands with different SHAs
     fetch_cmds = [f"fetch {SHA1} refs/heads/{BRANCH}"] * 20
@@ -157,9 +147,7 @@ def test_thread_safety_of_fetched_refs(session_client_mock, unbundle_mock):
 def test_cmd_fetch_thread_safety(session_client_mock, unbundle_mock):
     """Test that cmd_fetch is thread-safe when called concurrently"""
     s3_remote = S3Remote(UriScheme.S3, None, "test_bucket", "test_prefix")
-    session_client_mock.return_value.get_object.return_value = {
-        "Body": BytesIO(MOCK_BUNDLE_CONTENT)
-    }
+    session_client_mock.return_value.get_object.return_value = {"Body": BytesIO(MOCK_BUNDLE_CONTENT)}
 
     # Create a function that simulates concurrent access
     def concurrent_fetch():

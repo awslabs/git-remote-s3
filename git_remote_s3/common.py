@@ -8,7 +8,6 @@ import functools
 import re
 import subprocess
 import sys
-from typing import Optional
 
 import dns.exception
 import dns.resolver
@@ -19,7 +18,7 @@ from aws_s3_access_grants_boto3_plugin.s3_access_grants_plugin import (
 from .enums import UriScheme
 
 
-def parse_git_url(url: str) -> tuple[UriScheme, str, str, str]:
+def parse_git_url(url: str | None) -> tuple[UriScheme | None, str | None, str | None, str | None]:
     """Parses the elements in a s3:// remote origin URI
 
     Args:
@@ -39,13 +38,10 @@ def parse_git_url(url: str) -> tuple[UriScheme, str, str, str]:
         profile = profile[:-1]
     if prefix is not None:
         prefix = prefix.strip("/")
-    if uri_scheme is not None:
-        if uri_scheme == "s3":
-            uri_scheme = UriScheme.S3
-        if uri_scheme == "s3+zip":
-            uri_scheme = UriScheme.S3_ZIP
+    # The regex constrains group 1 to exactly "s3" or "s3+zip".
+    scheme = UriScheme.S3 if uri_scheme == "s3" else UriScheme.S3_ZIP
 
-    return uri_scheme, profile, bucket, prefix
+    return scheme, profile, bucket, prefix
 
 
 def scoped_list_prefix(prefix: str) -> str:
@@ -64,7 +60,7 @@ BUCKET_ALIAS_TXT_PREFIX = "git-bucket="
 BUCKET_ALIAS_CONFIG_KEY = "s3.dns-alias"
 
 
-def _bucket_alias_opt_out_key(remote_name: Optional[str]) -> str:
+def _bucket_alias_opt_out_key(remote_name: str | None) -> str:
     """Returns the git config key to disable aliasing for this remote.
 
     Falls back to the global key when the remote name is unknown or is a
@@ -76,7 +72,7 @@ def _bucket_alias_opt_out_key(remote_name: Optional[str]) -> str:
 
 
 class BucketAliasError(Exception):
-    def __init__(self, host: str, reason: str, remote_name: Optional[str] = None):
+    def __init__(self, host: str, reason: str, remote_name: str | None = None):
         self.host = host
         self.reason = reason
         self.remote_name = remote_name
@@ -89,13 +85,12 @@ class BucketAliasError(Exception):
         )
 
 
-@functools.lru_cache(maxsize=None)
-def _git_config_bool(key: str) -> Optional[bool]:
+@functools.cache
+def _git_config_bool(key: str) -> bool | None:
     """Returns the boolean value of a git config key, or None if unset."""
     res = subprocess.run(
         ["git", "config", "--type=bool", "--get", key],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
     )
     if res.returncode != 0:
         return None
@@ -107,7 +102,7 @@ def _git_config_bool(key: str) -> Optional[bool]:
     return None
 
 
-def bucket_alias_enabled(remote_name: Optional[str] = None) -> bool:
+def bucket_alias_enabled(remote_name: str | None = None) -> bool:
     """Returns whether DNS bucket alias resolution is enabled (default: True).
 
     Checks ``remote.<remote_name>.s3-dns-alias`` first when a remote name is
@@ -124,8 +119,8 @@ def bucket_alias_enabled(remote_name: Optional[str] = None) -> bool:
     return True
 
 
-@functools.lru_cache(maxsize=None)
-def resolve_bucket_alias(bucket: str, remote_name: Optional[str] = None) -> str:
+@functools.cache
+def resolve_bucket_alias(bucket: str, remote_name: str | None = None) -> str:
     """Resolves a DNS-aliased bucket name to the real S3 bucket name.
 
     A bucket component containing at least one dot is treated as a DNS
@@ -158,9 +153,9 @@ def resolve_bucket_alias(bucket: str, remote_name: Optional[str] = None) -> str:
     try:
         answers = dns.resolver.resolve(bucket, "TXT")
     except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
-        raise BucketAliasError(bucket, "no TXT record found", remote_name)
+        raise BucketAliasError(bucket, "no TXT record found", remote_name) from None
     except dns.exception.DNSException as e:
-        raise BucketAliasError(bucket, f"DNS TXT lookup failed ({e})", remote_name)
+        raise BucketAliasError(bucket, f"DNS TXT lookup failed ({e})", remote_name) from e
     values = [
         txt.removeprefix(BUCKET_ALIAS_TXT_PREFIX)
         for txt in (b"".join(rdata.strings).decode("utf-8") for rdata in answers)
@@ -175,17 +170,16 @@ def resolve_bucket_alias(bucket: str, remote_name: Optional[str] = None) -> str:
     if len(values) > 1:
         raise BucketAliasError(
             bucket,
-            f"found {len(values)} '{BUCKET_ALIAS_TXT_PREFIX}' values in TXT "
-            f"record, expected exactly one",
+            f"found {len(values)} '{BUCKET_ALIAS_TXT_PREFIX}' values in TXT record, expected exactly one",
             remote_name,
         )
     return values[0]
 
 
-_bucket_region_cache: dict[str, Optional[str]] = {}
+_bucket_region_cache: dict[str, str | None] = {}
 
 
-def resolve_bucket_region(session, bucket: str) -> Optional[str]:
+def resolve_bucket_region(session, bucket: str) -> str | None:
     """Returns the AWS region a bucket lives in, or None if undeterminable.
 
     HeadBucket reports the bucket's true region in the ``x-amz-bucket-region``
@@ -215,7 +209,7 @@ def resolve_bucket_region(session, bucket: str) -> Optional[str]:
     return region
 
 
-def _detect_bucket_region(session, bucket: str) -> Optional[str]:
+def _detect_bucket_region(session, bucket: str) -> str | None:
     s3 = session.client("s3")
     try:
         response = s3.head_bucket(Bucket=bucket)
@@ -327,9 +321,7 @@ def register_s3_access_grants(s3_client, session):
     Returns:
         the same client, with the plugin and fallback detector registered.
     """
-    plugin = S3AccessGrantsPlugin(
-        s3_client, fallback_enabled=True, customer_session=session._session
-    )
+    plugin = S3AccessGrantsPlugin(s3_client, fallback_enabled=True, customer_session=session._session)
     plugin.register()
     s3_client.meta.events.register("before-sign.s3", _detect_access_grants_fallback)
     return s3_client
@@ -353,8 +345,6 @@ def register_s3_access_grants_strict(s3_client, session):
     Returns:
         the same client, with the fallback-disabled plugin registered.
     """
-    plugin = S3AccessGrantsPlugin(
-        s3_client, fallback_enabled=False, customer_session=session._session
-    )
+    plugin = S3AccessGrantsPlugin(s3_client, fallback_enabled=False, customer_session=session._session)
     plugin.register()
     return s3_client

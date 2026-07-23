@@ -1,8 +1,9 @@
 import os
 import subprocess
 import tempfile
+from types import SimpleNamespace
 
-from mock import patch
+from unittest.mock import patch
 
 from git_remote_s3 import lfs
 
@@ -77,9 +78,9 @@ def test_resolve_git_dir_resolves_submodule_gitlink():
             },
         )
         sub_worktree = os.path.join(parent, "sub")
-        assert os.path.isfile(
-            os.path.join(sub_worktree, ".git")
-        ), "submodule .git should be a gitlink file, not a directory"
+        assert os.path.isfile(os.path.join(sub_worktree, ".git")), (
+            "submodule .git should be a gitlink file, not a directory"
+        )
 
         cwd = os.getcwd()
         try:
@@ -89,9 +90,7 @@ def test_resolve_git_dir_resolves_submodule_gitlink():
             os.chdir(cwd)
 
         assert os.path.isabs(git_dir)
-        assert os.path.isdir(
-            git_dir
-        ), f"resolved gitdir must be a real directory, got {git_dir!r}"
+        assert os.path.isdir(git_dir), f"resolved gitdir must be a real directory, got {git_dir!r}"
         expected = os.path.join(parent, ".git", "modules", "sub")
         assert os.path.samefile(git_dir, expected)
 
@@ -100,9 +99,7 @@ def test_resolve_git_dir_resolves_submodule_gitlink():
 def test_resolve_git_dir_invokes_rev_parse(check_output_mock):
     check_output_mock.return_value = "/fake/path/to/.git\n"
     result = lfs._resolve_git_dir()
-    check_output_mock.assert_called_once_with(
-        ["git", "rev-parse", "--absolute-git-dir"], text=True
-    )
+    check_output_mock.assert_called_once_with(["git", "rev-parse", "--absolute-git-dir"], text=True)
     assert result == "/fake/path/to/.git"
 
 
@@ -118,7 +115,7 @@ def test_download_uses_resolved_gitdir_for_temp_dir(
     proc.prefix = "test_prefix"
     proc.bucket = "test_bucket"
     proc.profile = None
-    proc.s3_bucket = type("B", (), {})()
+    proc.s3_bucket = SimpleNamespace()
     captured = {}
 
     def fake_download_file(Key, Filename, Callback):

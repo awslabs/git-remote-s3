@@ -1,7 +1,7 @@
 import subprocess
 
 import pytest
-from mock import patch
+from unittest.mock import patch
 
 import dns.resolver
 
@@ -114,10 +114,7 @@ def test_resolve_bucket_alias_opt_out_per_remote():
     with patch("git_remote_s3.common._git_config_bool") as mock_config:
         mock_config.side_effect = config.get
         with patch("dns.resolver.resolve") as mock_resolve:
-            assert (
-                resolve_bucket_alias("etc.git.example.com", "origin")
-                == "etc.git.example.com"
-            )
+            assert resolve_bucket_alias("etc.git.example.com", "origin") == "etc.git.example.com"
             mock_resolve.assert_not_called()
 
 
@@ -136,10 +133,7 @@ def test_resolve_bucket_alias_opt_out_global_applies_to_named_remote():
     with patch("git_remote_s3.common._git_config_bool") as mock_config:
         mock_config.side_effect = config.get
         with patch("dns.resolver.resolve") as mock_resolve:
-            assert (
-                resolve_bucket_alias("etc.git.example.com", "origin")
-                == "etc.git.example.com"
-            )
+            assert resolve_bucket_alias("etc.git.example.com", "origin") == "etc.git.example.com"
             mock_resolve.assert_not_called()
 
 
@@ -149,9 +143,7 @@ def test_resolve_bucket_alias_per_remote_overrides_global():
         mock_config.side_effect = config.get
         with patch("dns.resolver.resolve") as mock_resolve:
             mock_resolve.return_value = [TXTRecord(b"git-bucket=real-bucket")]
-            assert (
-                resolve_bucket_alias("etc.git.example.com", "origin") == "real-bucket"
-            )
+            assert resolve_bucket_alias("etc.git.example.com", "origin") == "real-bucket"
 
 
 def test_resolve_bucket_alias_default_on_when_no_config():
@@ -159,9 +151,7 @@ def test_resolve_bucket_alias_default_on_when_no_config():
         mock_config.return_value = None
         with patch("dns.resolver.resolve") as mock_resolve:
             mock_resolve.return_value = [TXTRecord(b"git-bucket=real-bucket")]
-            assert (
-                resolve_bucket_alias("etc.git.example.com", "origin") == "real-bucket"
-            )
+            assert resolve_bucket_alias("etc.git.example.com", "origin") == "real-bucket"
 
 
 def test_resolve_bucket_alias_url_remote_name_skips_per_remote_key():
@@ -169,12 +159,7 @@ def test_resolve_bucket_alias_url_remote_name_skips_per_remote_key():
     with patch("git_remote_s3.common._git_config_bool") as mock_config:
         mock_config.side_effect = config.get
         with patch("dns.resolver.resolve") as mock_resolve:
-            assert (
-                resolve_bucket_alias(
-                    "etc.git.example.com", "s3://etc.git.example.com/repo"
-                )
-                == "etc.git.example.com"
-            )
+            assert resolve_bucket_alias("etc.git.example.com", "s3://etc.git.example.com/repo") == "etc.git.example.com"
             mock_resolve.assert_not_called()
         mock_config.assert_called_once_with("s3.dns-alias")
 
@@ -201,38 +186,29 @@ def test_resolve_bucket_alias_error_includes_global_opt_out_hint():
 
 def test_git_config_bool_reads_via_git_config():
     with patch("git_remote_s3.common.subprocess.run") as mock_run:
-        mock_run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=b"false\n", stderr=b""
-        )
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=b"false\n", stderr=b"")
         assert _git_config_bool("s3.dns-alias") is False
         mock_run.assert_called_once_with(
             ["git", "config", "--type=bool", "--get", "s3.dns-alias"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
         )
 
 
 def test_git_config_bool_true_value():
     with patch("git_remote_s3.common.subprocess.run") as mock_run:
-        mock_run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=b"true\n", stderr=b""
-        )
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=b"true\n", stderr=b"")
         assert _git_config_bool("remote.origin.s3-dns-alias") is True
 
 
 def test_git_config_bool_missing_key_is_unset():
     with patch("git_remote_s3.common.subprocess.run") as mock_run:
-        mock_run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=1, stdout=b"", stderr=b""
-        )
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=1, stdout=b"", stderr=b"")
         assert _git_config_bool("s3.dns-alias") is None
 
 
 def test_git_config_bool_caches_per_process():
     with patch("git_remote_s3.common.subprocess.run") as mock_run:
-        mock_run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=b"false\n", stderr=b""
-        )
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=b"false\n", stderr=b"")
         assert _git_config_bool("s3.dns-alias") is False
         assert _git_config_bool("s3.dns-alias") is False
         mock_run.assert_called_once()

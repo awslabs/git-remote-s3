@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
-from mock import patch
+from unittest.mock import patch
 
 from git_remote_s3 import UriScheme
 from git_remote_s3.manage import main
@@ -39,13 +39,9 @@ def test_doctor_without_branch_parses_and_runs(mocked_cli_chain, monkeypatch):
     manage_branch_cls.assert_not_called()
 
 
-def test_delete_branch_without_branch_still_errors(
-    mocked_cli_chain, monkeypatch, capsys
-):
+def test_delete_branch_without_branch_still_errors(mocked_cli_chain, monkeypatch, capsys):
     _, manage_branch_cls = mocked_cli_chain
-    monkeypatch.setattr(
-        "sys.argv", ["git-s3", "delete-branch", "s3://profile@bucket/repo"]
-    )
+    monkeypatch.setattr("sys.argv", ["git-s3", "delete-branch", "s3://profile@bucket/repo"])
 
     with pytest.raises(SystemExit) as excinfo:
         main()

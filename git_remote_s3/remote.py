@@ -35,7 +35,7 @@ from .common import (
     BucketAliasError,
 )
 import botocore
-from typing import Optional
+import contextlib
 
 logger = logging.getLogger(__name__)
 if "remote" in __name__:
@@ -54,6 +54,7 @@ if "remote" in __name__:
 
 DEFAULT_LOCK_TTL_SECONDS = 60
 
+
 class BucketNotFoundError(Exception):
     def __init__(self, bucket: str):
         self.bucket = bucket
@@ -64,9 +65,7 @@ class NotAuthorizedError(Exception):
     def __init__(self, action: str, bucket: str):
         self.bucket = bucket
         self.action = action
-        super().__init__(
-            f"Not authorized to perform {action} on the S3 bucket {bucket}."
-        )
+        super().__init__(f"Not authorized to perform {action} on the S3 bucket {bucket}.")
 
 
 class Mode:
@@ -96,7 +95,7 @@ def maybe_install_lfs_agent(remote_name: str) -> None:
     _git_config_add("lfs.standalonetransferagent", "git-lfs-s3")
 
 
-def _git_config_get(key: str) -> Optional[str]:
+def _git_config_get(key: str) -> str | None:
     try:
         out = subprocess.check_output(
             ["git", "config", "--get", key],
@@ -109,14 +108,12 @@ def _git_config_get(key: str) -> Optional[str]:
 
 
 def _git_config_add(key: str, value: str) -> None:
-    try:
+    with contextlib.suppress(FileNotFoundError):
         subprocess.run(
             ["git", "config", "--add", key, value],
             check=False,
             stderr=subprocess.DEVNULL,
         )
-    except FileNotFoundError:
-        pass
 
 
 class S3Remote:
@@ -141,9 +138,9 @@ class S3Remote:
             self.s3.list_objects_v2(Bucket=bucket, Prefix=scoped_list_prefix(prefix))
         except ClientError as e:
             if e.response["Error"]["Code"] == "NoSuchBucket":
-                raise BucketNotFoundError(bucket)
+                raise BucketNotFoundError(bucket) from e
             if e.response["Error"]["Code"] == "AccessDenied":
-                raise NotAuthorizedError("ListObjectsV2", bucket)
+                raise NotAuthorizedError("ListObjectsV2", bucket) from e
             raise e
 
         self.bucket = bucket
@@ -172,9 +169,7 @@ class S3Remote:
         next_token = res.get("NextContinuationToken", None)
 
         while next_token:
-            res = self.s3.list_objects_v2(
-                Bucket=bucket, Prefix=list_prefix, ContinuationToken=next_token
-            )
+            res = self.s3.list_objects_v2(Bucket=bucket, Prefix=list_prefix, ContinuationToken=next_token)
             contents.extend(res.get("Contents", []))
             next_token = res.get("NextContinuationToken", None)
 
@@ -194,7 +189,7 @@ class S3Remote:
             if sha in self.fetched_refs:
                 return
         logger.info(f"fetch {sha} {ref}")
-        temp_dir: Optional[str] = None
+        temp_dir: str | None = None
         try:
             temp_dir = tempfile.mkdtemp(prefix="git_remote_s3_fetch_")
             bundle_path = f"{temp_dir}/{sha}.bundle"
@@ -232,19 +227,18 @@ class S3Remote:
                 self.fetched_refs.append(sha)
         except ClientError as e:
             if e.response["Error"]["Code"] == "AccessDenied":
-                raise NotAuthorizedError("GetObject", self.bucket)
+                raise NotAuthorizedError("GetObject", self.bucket) from e
             raise e
         finally:
-            if temp_dir is not None:
-                if os.path.exists(f"{temp_dir}/{sha}.bundle"):
-                    os.remove(f"{temp_dir}/{sha}.bundle")
+            if temp_dir is not None and os.path.exists(f"{temp_dir}/{sha}.bundle"):
+                os.remove(f"{temp_dir}/{sha}.bundle")
 
     def remove_remote_ref(self, remote_ref: str) -> str:
         logger.info(f"Removing remote ref {remote_ref}")
         try:
-            objects_to_delete = self.s3.list_objects_v2(
-                Bucket=self.bucket, Prefix=f"{self.prefix}/{remote_ref}/"
-            ).get("Contents", [])
+            objects_to_delete = self.s3.list_objects_v2(Bucket=self.bucket, Prefix=f"{self.prefix}/{remote_ref}/").get(
+                "Contents", []
+            )
             if (
                 self.uri_scheme == UriScheme.S3
                 and len(objects_to_delete) == 1
@@ -283,8 +277,8 @@ class S3Remote:
             return f'error {remote_ref} "multiple bundles exists on server. Run git-s3 doctor to fix."?\n'  # noqa: B950
 
         remote_to_remove = contents[0]["Key"] if len(contents) == 1 else None
-        sha: Optional[str] = None
-        lock_key: Optional[str] = None
+        sha: str | None = None
+        lock_key: str | None = None
         try:
             sha = git.rev_parse(local_ref)
             if remote_to_remove:
@@ -301,22 +295,25 @@ class S3Remote:
                 # Provide clear guidance to the user; include lock path and TTL
                 lock_path = f"{self.prefix}/{remote_ref}/LOCK#.lock"
                 return (
-                    f'error {remote_ref} '
+                    f"error {remote_ref} "
                     f'"failed to acquire ref lock at {lock_path}. '
-                    f'Another client may be pushing. If this persists beyond {self.lock_ttl_seconds}s, '
-                    f'run git-remote-s3 doctor --lock-ttl {self.lock_ttl_seconds} to inspect and optionally clear stale locks."?\n'
+                    f"Another client may be pushing. If this persists beyond {self.lock_ttl_seconds}s, "
+                    f"run git-remote-s3 doctor --lock-ttl {self.lock_ttl_seconds} to inspect and "
+                    f'optionally clear stale locks."?\n'
                 )
 
             # If remote has multiple bundles for the ref, then reject push and notify client(s)
             # to upgrade to new locking behavior
-            # Otherwise, proceed with pushing the new bundle 
+            # Otherwise, proceed with pushing the new bundle
             current_contents = self.get_bundles_for_ref(remote_ref)
             if len(current_contents) > 1:
-                return f'error {remote_ref} "multiple bundles exists for the same ref on server. Run git-s3 doctor to fix. Upgrade git-remote-s3 to latest version to prevent this in the future."\n'
+                return (
+                    f'error {remote_ref} "multiple bundles exists for the same ref on server. '
+                    f"Run git-s3 doctor to fix. Upgrade git-remote-s3 to latest version to "
+                    f'prevent this in the future."\n'
+                )
 
-            current_remote_to_remove = (
-                current_contents[0]["Key"] if len(current_contents) == 1 else None
-            )
+            current_remote_to_remove = current_contents[0]["Key"] if len(current_contents) == 1 else None
             if (
                 remote_to_remove is not None
                 and current_remote_to_remove is not None
@@ -350,8 +347,7 @@ class S3Remote:
                         ContentDisposition=f"attachment; filename=repo-{sha[:8]}.zip",
                     )
                 logger.info(
-                    f"pushed {temp_file_archive} to "
-                    + "{self.prefix}/{remote_ref}/repo.zip with message {commit_msg}"
+                    f"pushed {temp_file_archive} to " + "{self.prefix}/{remote_ref}/repo.zip with message {commit_msg}"
                 )
 
             return f"ok {remote_ref}\n"
@@ -370,7 +366,11 @@ class S3Remote:
                     self.release_lock(remote_ref, lock_key)
                 except Exception as e:
                     logger.info(f"failed to release lock {lock_key} for {remote_ref}: {e}")
-                    return f'error {remote_ref} "failed to release lock. You may need to manually remove the lock {lock_key} from the server or use git-s3 doctor to fix."?\n'
+                    return (
+                        f'error {remote_ref} "failed to release lock. You may need to '
+                        f"manually remove the lock {lock_key} from the server or use "
+                        f'git-s3 doctor to fix."?\n'
+                    )
             if sha and os.path.exists(f"{temp_dir}/{sha}.bundle"):
                 os.remove(f"{temp_dir}/{sha}.bundle")
 
@@ -404,9 +404,9 @@ class S3Remote:
         # under a single Prefix
         return [
             c
-            for c in self.s3.list_objects_v2(
-                Bucket=self.bucket, Prefix=f"{self.prefix}/{remote_ref}/"
-            ).get("Contents", [])
+            for c in self.s3.list_objects_v2(Bucket=self.bucket, Prefix=f"{self.prefix}/{remote_ref}/").get(
+                "Contents", []
+            )
             if "PROTECTED#" not in c["Key"]
             and ".zip" not in c["Key"]
             and "/LOCKS/" not in c["Key"]
@@ -414,17 +414,17 @@ class S3Remote:
         ]
 
     def is_protected(self, remote_ref):
-        protected = self.s3.list_objects_v2(
-            Bucket=self.bucket, Prefix=f"{self.prefix}/{remote_ref}/PROTECTED#"
-        ).get("Contents", [])
+        protected = self.s3.list_objects_v2(Bucket=self.bucket, Prefix=f"{self.prefix}/{remote_ref}/PROTECTED#").get(
+            "Contents", []
+        )
         return protected
 
-    def acquire_lock(self, remote_ref: str) -> Optional[str]:
+    def acquire_lock(self, remote_ref: str) -> str | None:
         """Acquire a per-ref lock using S3 conditional writes.
 
         Client attempts to create a single lock object under <prefix>/<ref>/ using
         S3's HTTP `If-None-Match` conditional header so that only one client can write the
-        lock in case of acquisition races. 
+        lock in case of acquisition races.
         If unable to acquire the lock, check for staleness of the lock and delete it if it is stale.
         Clients that lose the race will get a `412 PreconditionFailed` and should retry later.
 
@@ -443,13 +443,12 @@ class S3Remote:
             return lock_key
         except botocore.exceptions.ClientError as e:
             # 412 PreconditionFailed when the lock already exists
-            if (
-                e.response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 412
-                or e.response.get("Error", {}).get("Code") in [
-                    "PreconditionFailed",
-                    "412",
-                ]
-            ):
+            if e.response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 412 or e.response.get("Error", {}).get(
+                "Code"
+            ) in [
+                "PreconditionFailed",
+                "412",
+            ]:
                 # Check if the existing lock is stale; if so, try to clear and acquire
                 try:
                     head = self.s3.head_object(Bucket=self.bucket, Key=lock_key)
@@ -528,11 +527,7 @@ class S3Remote:
             str: the remote head ref
         """
         head = (
-            self.s3.get_object(Bucket=self.bucket, Key=f"{self.prefix}/HEAD")
-            .get("Body")
-            .read()
-            .decode("utf-8")
-            .strip()
+            self.s3.get_object(Bucket=self.bucket, Key=f"{self.prefix}/HEAD").get("Body").read().decode("utf-8").strip()
         )
 
         return head
@@ -612,9 +607,7 @@ def main():
     remote = sys.argv[2]
     uri_scheme, profile, bucket, prefix = parse_git_url(remote)
     if bucket is None or prefix is None:
-        sys.stderr.write(
-            f"fatal: invalid remote '{remote}'. You need to have a bucket and a prefix.\n"
-        )
+        sys.stderr.write(f"fatal: invalid remote '{remote}'. You need to have a bucket and a prefix.\n")
         sys.exit(1)
     try:
         bucket = resolve_bucket_alias(bucket, remote_name)
@@ -667,15 +660,11 @@ def main():
         sys.stderr.flush()
         sys.exit(1)
     except NotAuthorizedError as e:
-        sys.stderr.write(
-            f"fatal: user not authorized to perform {e.action} on {e.bucket}\n"
-        )
+        sys.stderr.write(f"fatal: user not authorized to perform {e.action} on {e.bucket}\n")
         sys.stderr.flush()
         sys.exit(1)
     except Exception as e:
         logger.info(e)
-        sys.stderr.write(
-            "fatal: unknown error. Run with --verbose flag to get full log\n"
-        )
+        sys.stderr.write("fatal: unknown error. Run with --verbose flag to get full log\n")
         sys.stderr.flush()
         sys.exit(1)

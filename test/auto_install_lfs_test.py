@@ -1,8 +1,7 @@
-import os
 import subprocess
 import tempfile
 import pytest
-from mock import patch
+from unittest.mock import patch
 from git_remote_s3 import S3Remote, UriScheme
 from git_remote_s3.remote import maybe_install_lfs_agent
 

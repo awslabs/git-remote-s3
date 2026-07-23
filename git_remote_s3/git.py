@@ -25,8 +25,7 @@ def archive(*, folder: str, ref: str) -> str:
     file_path = f"{folder}/repo.zip"
     result = subprocess.run(
         ["git", "archive", "--format", "zip", "--output", file_path, ref],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=True,
     )
 
@@ -50,8 +49,7 @@ def bundle(*, folder: str, sha: str, ref: str) -> str:
     file_path = f"{folder}/{sha}.bundle"
     result = subprocess.run(
         ["git", "bundle", "create", file_path, ref],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=True,
     )
 
@@ -115,9 +113,7 @@ def is_ancestor(ancestor: str, descendant: str) -> bool:
 
 
 def get_remote_url(remote: str) -> str:
-    result = subprocess.run(
-        ["git", "remote", "get-url", remote], stdout=subprocess.PIPE
-    )
+    result = subprocess.run(["git", "remote", "get-url", remote], stdout=subprocess.PIPE)
     if result.returncode != 0:
         raise GitError(f"fatal: {remote} not found")
     url = result.stdout.decode("utf8").strip()
@@ -137,9 +133,7 @@ def validate_ref_name(name: str) -> bool:
 
 
 def get_last_commit_message() -> str:
-    result = subprocess.run(
-        ["git", "log", "-1", "--pretty=%h %s"], stdout=subprocess.PIPE
-    )
+    result = subprocess.run(["git", "log", "-1", "--pretty=%h %s"], stdout=subprocess.PIPE)
     if result.returncode != 0:
         raise GitError("fatal: an error as occurred")
     message = result.stdout.decode("utf8").strip()

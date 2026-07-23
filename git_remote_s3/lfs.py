@@ -11,7 +11,7 @@ import subprocess
 import boto3
 import threading
 import os
-from typing import Optional
+from typing import Any
 from .common import (
     parse_git_url,
     resolve_bucket_alias,
@@ -31,9 +31,7 @@ def _resolve_git_dir() -> str:
     Returns:
         str: absolute path to the gitdir; resolves submodule gitlink files.
     """
-    return subprocess.check_output(
-        ["git", "rev-parse", "--absolute-git-dir"], text=True
-    ).strip()
+    return subprocess.check_output(["git", "rev-parse", "--absolute-git-dir"], text=True).strip()
 
 
 def _configure_logging() -> None:
@@ -82,13 +80,11 @@ def write_error_event(*, oid: str, error: str, flush=False):
 
 
 class LFSProcess:
-    def __init__(self, s3uri: str, remote_name: Optional[str] = None):
+    def __init__(self, s3uri: str, remote_name: str | None = None):
         uri_scheme, profile, bucket, prefix = parse_git_url(s3uri)
         if bucket is None or prefix is None:
             logger.error(f"s3 uri {s3uri} is invalid")
-            error_event = {
-                "error": {"code": 32, "message": f"s3 uri {s3uri} is invalid"}
-            }
+            error_event = {"error": {"code": 32, "message": f"s3 uri {s3uri} is invalid"}}
             sys.stdout.write(f"{json.dumps(error_event)}\n")
             sys.stdout.flush()
             return
@@ -103,17 +99,15 @@ class LFSProcess:
         self.prefix = prefix
         self.bucket = bucket
         self.profile = profile
-        self.s3_bucket = None
+        # boto3 resource objects are dynamically typed; there are no first-party stubs.
+        self.s3_bucket: Any = None
         sys.stdout.write("{}\n")
         sys.stdout.flush()
 
     def init_s3_bucket(self):
         if self.s3_bucket is not None:
             return
-        if self.profile is None:
-            session = boto3.Session()
-        else:
-            session = boto3.Session(profile_name=self.profile)
+        session = boto3.Session() if self.profile is None else boto3.Session(profile_name=self.profile)
         s3 = session.resource("s3", **s3_region_kwargs(session, self.bucket))
         # Bucket operations flow through the resource's underlying client, so the
         # plugin is registered there.
@@ -124,15 +118,9 @@ class LFSProcess:
         logger.debug("upload")
         try:
             self.init_s3_bucket()
-            if list(
-                self.s3_bucket.objects.filter(
-                    Prefix=f"{self.prefix}/lfs/{event['oid']}"
-                )
-            ):
+            if list(self.s3_bucket.objects.filter(Prefix=f"{self.prefix}/lfs/{event['oid']}")):
                 logger.debug("object already exists")
-                sys.stdout.write(
-                    f"{json.dumps({'event': 'complete', 'oid': event['oid']})}\n"
-                )
+                sys.stdout.write(f"{json.dumps({'event': 'complete', 'oid': event['oid']})}\n")
                 sys.stdout.flush()
                 return
             self.s3_bucket.upload_file(
@@ -140,9 +128,7 @@ class LFSProcess:
                 f"{self.prefix}/lfs/{event['oid']}",
                 Callback=ProgressPercentage(event["oid"]),
             )
-            sys.stdout.write(
-                f"{json.dumps({'event': 'complete', 'oid': event['oid']})}\n"
-            )
+            sys.stdout.write(f"{json.dumps({'event': 'complete', 'oid': event['oid']})}\n")
         except Exception as e:
             logger.error(e)
             write_error_event(oid=event["oid"], error=str(e))
@@ -172,12 +158,11 @@ class LFSProcess:
         sys.stdout.flush()
 
 
-def _git_config_get(key: str) -> Optional[str]:
+def _git_config_get(key: str) -> str | None:
     """Returns the current value of a git config key, or None if unset."""
     res = subprocess.run(
         ["git", "config", "--get", key],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
     )
     if res.returncode != 0:
         return None
@@ -200,8 +185,7 @@ def _list_git_remotes() -> list:
     """Returns the list of configured git remote names (empty on error)."""
     res = subprocess.run(
         ["git", "remote"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
     )
     if res.returncode != 0:
         return []
@@ -215,8 +199,7 @@ def _resolve_s3_remote(remote_name: str) -> tuple:
     """
     res = subprocess.run(
         ["git", "remote", "get-url", remote_name],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
     )
     if res.returncode != 0:
         sys.stderr.write(
@@ -245,7 +228,7 @@ def _resolve_s3_remote(remote_name: str) -> tuple:
     return bucket, prefix
 
 
-def install(*, remote_name: Optional[str] = None) -> None:
+def install(*, remote_name: str | None = None) -> None:
     """Installs git-lfs-s3 as a custom transfer agent.
 
     With remote_name=None, writes unscoped configuration that applies to
@@ -303,17 +286,15 @@ def _install_scoped(remote_name: str) -> None:
     _git_config_set("lfs.customtransfer.git-lfs-s3.path", "git-lfs-s3")
     _git_config_set(f"remote.{remote_name}.lfsurl", lfs_url)
     _git_config_set(f"lfs.{lfs_url}.standalonetransferagent", "git-lfs-s3")
-    sys.stdout.write(
-        f"git-lfs-s3 installed for remote '{remote_name}' " f"(LFS alias: {lfs_url})\n"
-    )
+    sys.stdout.write(f"git-lfs-s3 installed for remote '{remote_name}' (LFS alias: {lfs_url})\n")
     sys.stdout.flush()
 
 
 def main():  # noqa: C901
     _configure_logging()
     if len(sys.argv) > 1:
-        if "install" == sys.argv[1]:
-            remote_name: Optional[str] = None
+        if sys.argv[1] == "install":
+            remote_name: str | None = None
             args = sys.argv[2:]
             i = 0
             while i < len(args):
@@ -330,9 +311,9 @@ def main():  # noqa: C901
                     sys.exit(2)
             install(remote_name=remote_name)
             sys.exit(0)
-        elif "debug" == sys.argv[1]:
+        elif sys.argv[1] == "debug":
             logger.setLevel(logging.DEBUG)
-        elif "enable-debug" == sys.argv[1]:
+        elif sys.argv[1] == "enable-debug":
             subprocess.run(
                 [
                     "git",
@@ -344,10 +325,8 @@ def main():  # noqa: C901
             )
             print("debug enabled")
             sys.exit(0)
-        elif "disable-debug" == sys.argv[1]:
-            subprocess.run(
-                ["git", "config", "--unset", "lfs.customtransfer.git-lfs-s3.args"]
-            )
+        elif sys.argv[1] == "disable-debug":
+            subprocess.run(["git", "config", "--unset", "lfs.customtransfer.git-lfs-s3.args"])
             print("debug disabled")
             sys.exit(0)
         else:
@@ -370,15 +349,14 @@ def main():  # noqa: C901
                 sys.exit(1)
             result = subprocess.run(
                 ["git", "remote", "get-url", event["remote"]],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
             )
             if result.returncode != 0:
                 logger.error(result.stderr.decode("utf-8").strip())
                 error_event = {
                     "error": {
                         "code": 2,
-                        "message": f"cannot resolve remote \"{event['remote']}\"",
+                        "message": f'cannot resolve remote "{event["remote"]}"',
                     }
                 }
                 sys.stdout.write(f"{json.dumps(error_event)}")
@@ -388,6 +366,8 @@ def main():  # noqa: C901
             lfs_process = LFSProcess(s3uri=s3uri, remote_name=event["remote"])
 
         elif event["event"] == "upload":
+            assert lfs_process is not None  # git always sends "init" before any transfer event
             lfs_process.upload(event)
         elif event["event"] == "download":
+            assert lfs_process is not None  # git always sends "init" before any transfer event
             lfs_process.download(event)
