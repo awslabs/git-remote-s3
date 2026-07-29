@@ -52,6 +52,8 @@ def write_error_event(*, oid: str, error: str, flush=False):
         sys.stdout.flush()
 
 
+
+
 class LFSProcess:
     def __init__(self, s3uri: str):
         uri_scheme, profile, bucket, prefix = parse_git_url(s3uri)
@@ -152,6 +154,41 @@ def install():
     sys.stdout.write("git-lfs-s3 installed\n")
     sys.stdout.flush()
 
+def _lfs_only_url(remote: str) -> str | None:
+    """
+    Try to get LFS-specific URL (for hybrid setups like GitHub + S3).
+    Priority: .lfsconfig (tracked) > .git/config (local)
+    
+    Args:
+        remote: The remote name to look up
+        
+    Returns:
+        The LFS URL if found, None otherwise
+    """
+    # 1. Try .lfsconfig first (tracked file, shared with team)
+    result = subprocess.run(
+        ["git", "config", "--file", ".lfsconfig", "--get", f"remote.{remote}.lfsurl"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        s3uri = result.stdout.decode("utf-8").strip()
+        logger.debug(f"Using lfsurl from .lfsconfig: {s3uri}")
+        return s3uri
+    
+    # 2. Try local .git/config (allows per-developer override)
+    result = subprocess.run(
+        ["git", "config", "--get", f"remote.{remote}.lfsurl"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        s3uri = result.stdout.decode("utf-8").strip()
+        logger.debug(f"Using lfsurl from .git/config: {s3uri}")
+        return s3uri
+    
+    return None
+
 
 def main():  # noqa: C901
     if len(sys.argv) > 1:
@@ -196,23 +233,29 @@ def main():  # noqa: C901
                 sys.stdout.write("{}\n")
                 sys.stdout.flush()
                 sys.exit(1)
-            result = subprocess.run(
-                ["git", "remote", "get-url", event["remote"]],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            if result.returncode != 0:
-                logger.error(result.stderr.decode("utf-8").strip())
-                error_event = {
-                    "error": {
-                        "code": 2,
-                        "message": f"cannot resolve remote \"{event['remote']}\"",
+            # Try to get LFS-specific URL (for hybrid setups like GitHub + S3)
+            # Priority: .lfsconfig (tracked) > .git/config (local) > git remote url (fallback)
+            s3uri = _lfs_only_url(event["remote"])
+            if s3uri is None:
+                # 3. Fall back to regular remote URL
+                result = subprocess.run(
+                    ["git", "remote", "get-url", event["remote"]],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                if result.returncode != 0:
+                    logger.error(result.stderr.decode("utf-8").strip())
+                    error_event = {
+                        "error": {
+                            "code": 2,
+                            "message": f"cannot resolve remote \"{event['remote']}\"",
+                        }
                     }
-                }
-                sys.stdout.write(f"{json.dumps(error_event)}")
-                sys.stdout.flush()
-                sys.exit(1)
-            s3uri = result.stdout.decode("utf-8").strip()
+                    sys.stdout.write(f"{json.dumps(error_event)}")
+                    sys.stdout.flush()
+                    sys.exit(1)
+                s3uri = result.stdout.decode("utf-8").strip()
+                logger.debug(f"Using remote URL: {s3uri}")
             lfs_process = LFSProcess(s3uri=s3uri)
 
         elif event["event"] == "upload":
