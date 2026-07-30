@@ -251,6 +251,11 @@ def synthetic_lfs_url(bucket: str, prefix: str) -> str:
     git-lfs's HTTPS-shaped endpoint resolution short-circuits its SSH-style
     discovery for ``s3://`` URLs. The hostname uses the RFC 6761-reserved
     ``.test`` TLD to guarantee non-collision with any real host.
+
+    Callers must pass the remote URL's bucket component verbatim, NOT the
+    alias-resolved bucket name: a DNS alias is the remote's stable public
+    identity, and persisting it keeps the rendered git config valid when the
+    alias is re-pointed at a different bucket.
     """
     return f"https://{LFS_ALIAS_HOST}/{bucket}/{prefix}"
 

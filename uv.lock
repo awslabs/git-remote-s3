@@ -182,7 +182,7 @@ wheels = [
 
 [[package]]
 name = "fduplex-git-remote-s3"
-version = "0.4.1"
+version = "0.4.2"
 source = { editable = "." }
 dependencies = [
     { name = "aws-s3-access-grants-boto3-plugin" },

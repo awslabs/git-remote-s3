@@ -3,10 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import subprocess
+from unittest.mock import patch
+
 import pytest
 
 from git_remote_s3 import lfs
-from git_remote_s3.common import synthetic_lfs_url, LFS_ALIAS_HOST
+from git_remote_s3.common import synthetic_lfs_url, BucketAliasError, LFS_ALIAS_HOST
 
 
 def _git(args, cwd):
@@ -145,6 +147,69 @@ def test_install_remote_refuses_to_overwrite_existing_lfsurl(repo, capsys):
     assert "already set" in captured.err
     assert "https://real-lfs.example.com/foo" in captured.err
     assert _git_config_get_all("remote.s3.lfsurl", repo) == ["https://real-lfs.example.com/foo"]
+
+
+def test_install_remote_preserves_dns_alias_in_lfsurl(repo, capsys):
+    _git(["git", "remote", "add", "s3", "s3://demos.git.example.com/path/repo"], cwd=repo)
+    expected_url = synthetic_lfs_url("demos.git.example.com", "path/repo")
+
+    with patch("git_remote_s3.lfs.resolve_bucket_alias", return_value="real-bucket") as resolve:
+        lfs.install(remote_name="s3")
+
+    resolve.assert_called_once_with("demos.git.example.com", "s3")
+    assert _git_config_get_all("remote.s3.lfsurl", repo) == [expected_url]
+    assert _git_config_get_all(f"lfs.{expected_url}.standalonetransferagent", repo) == ["git-lfs-s3"]
+    captured = capsys.readouterr()
+    assert "real-bucket" not in captured.out
+
+
+def test_install_remote_unresolvable_alias_exits(repo, capsys):
+    _git(["git", "remote", "add", "s3", "s3://demos.git.example.com/repo"], cwd=repo)
+
+    with (
+        patch(
+            "git_remote_s3.lfs.resolve_bucket_alias",
+            side_effect=BucketAliasError("demos.git.example.com", "no TXT record found", "s3"),
+        ),
+        pytest.raises(SystemExit) as exc,
+    ):
+        lfs.install(remote_name="s3")
+
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert "demos.git.example.com" in captured.err
+    assert _git_config_get_all("remote.s3.lfsurl", repo) == []
+
+
+def test_install_remote_migrates_legacy_resolved_bucket_lfsurl(repo, capsys):
+    _git(["git", "remote", "add", "s3", "s3://demos.git.example.com/repo"], cwd=repo)
+    legacy_url = synthetic_lfs_url("real-bucket", "repo")
+    _git(["git", "config", "remote.s3.lfsurl", legacy_url], cwd=repo)
+    _git(["git", "config", f"lfs.{legacy_url}.standalonetransferagent", "git-lfs-s3"], cwd=repo)
+
+    with patch("git_remote_s3.lfs.resolve_bucket_alias", return_value="real-bucket"):
+        lfs.install(remote_name="s3")
+
+    expected_url = synthetic_lfs_url("demos.git.example.com", "repo")
+    assert _git_config_get_all("remote.s3.lfsurl", repo) == [expected_url]
+    assert _git_config_get_all(f"lfs.{expected_url}.standalonetransferagent", repo) == ["git-lfs-s3"]
+    assert _git_config_get_all(f"lfs.{legacy_url}.standalonetransferagent", repo) == []
+    captured = capsys.readouterr()
+    assert "migrated" in captured.out
+
+
+def test_install_remote_alias_form_is_idempotent(repo, capsys):
+    _git(["git", "remote", "add", "s3", "s3://demos.git.example.com/repo"], cwd=repo)
+
+    with patch("git_remote_s3.lfs.resolve_bucket_alias", return_value="real-bucket"):
+        lfs.install(remote_name="s3")
+        lfs.install(remote_name="s3")
+
+    expected_url = synthetic_lfs_url("demos.git.example.com", "repo")
+    assert _git_config_get_all("remote.s3.lfsurl", repo) == [expected_url]
+    assert _git_config_get_all(f"lfs.{expected_url}.standalonetransferagent", repo) == ["git-lfs-s3"]
+    captured = capsys.readouterr()
+    assert "migrated" not in captured.out
 
 
 def test_install_remote_warns_on_existing_unscoped_agent(repo, capsys):

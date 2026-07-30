@@ -181,6 +181,14 @@ def _git_config_set(key: str, value: str) -> None:
         sys.exit(1)
 
 
+def _git_config_unset_all(key: str) -> None:
+    """Unsets all values of a git config key; a missing key is not an error."""
+    subprocess.run(
+        ["git", "config", "--unset-all", key],
+        capture_output=True,
+    )
+
+
 def _list_git_remotes() -> list:
     """Returns the list of configured git remote names (empty on error)."""
     res = subprocess.run(
@@ -195,7 +203,12 @@ def _list_git_remotes() -> list:
 def _resolve_s3_remote(remote_name: str) -> tuple:
     """Validates that remote_name exists and points at an S3 URL.
 
-    Returns (bucket, prefix). Exits 1 with a clear error message otherwise.
+    Returns (bucket, resolved_bucket, prefix). ``bucket`` is the URL's bucket
+    component verbatim — a DNS alias stays an alias, so config rendered from it
+    survives the underlying bucket being re-pointed. ``resolved_bucket`` is the
+    alias-resolved bucket name (equal to ``bucket`` when not aliased); resolving
+    here makes a broken alias fail at install time rather than at first
+    transfer. Exits 1 with a clear error message otherwise.
     """
     res = subprocess.run(
         ["git", "remote", "get-url", remote_name],
@@ -220,12 +233,12 @@ def _resolve_s3_remote(remote_name: str) -> tuple:
         sys.stderr.flush()
         sys.exit(1)
     try:
-        bucket = resolve_bucket_alias(bucket, remote_name)
+        resolved_bucket = resolve_bucket_alias(bucket, remote_name)
     except BucketAliasError as e:
         sys.stderr.write(f"error: {e}\n")
         sys.stderr.flush()
         sys.exit(1)
-    return bucket, prefix
+    return bucket, resolved_bucket, prefix
 
 
 def install(*, remote_name: str | None = None) -> None:
@@ -260,11 +273,15 @@ def _install_unscoped() -> None:
 
 
 def _install_scoped(remote_name: str) -> None:
-    bucket, prefix = _resolve_s3_remote(remote_name)
+    bucket, resolved_bucket, prefix = _resolve_s3_remote(remote_name)
     lfs_url = synthetic_lfs_url(bucket, prefix)
+    # Older installs rendered the resolved bucket name into the synthetic URL;
+    # that form is provably ours, so migrate it to the alias form instead of
+    # refusing to touch it.
+    legacy_lfs_url = synthetic_lfs_url(resolved_bucket, prefix)
 
     existing_lfsurl = _git_config_get(f"remote.{remote_name}.lfsurl")
-    if existing_lfsurl is not None and existing_lfsurl != lfs_url:
+    if existing_lfsurl is not None and existing_lfsurl not in (lfs_url, legacy_lfs_url):
         sys.stderr.write(
             f"error: remote.{remote_name}.lfsurl is already set to "
             f"'{existing_lfsurl}'. git-lfs-s3 will not overwrite an "
@@ -286,6 +303,9 @@ def _install_scoped(remote_name: str) -> None:
     _git_config_set("lfs.customtransfer.git-lfs-s3.path", "git-lfs-s3")
     _git_config_set(f"remote.{remote_name}.lfsurl", lfs_url)
     _git_config_set(f"lfs.{lfs_url}.standalonetransferagent", "git-lfs-s3")
+    if existing_lfsurl == legacy_lfs_url and legacy_lfs_url != lfs_url:
+        _git_config_unset_all(f"lfs.{legacy_lfs_url}.standalonetransferagent")
+        sys.stdout.write(f"migrated remote '{remote_name}' LFS config from resolved bucket '{resolved_bucket}'\n")
     sys.stdout.write(f"git-lfs-s3 installed for remote '{remote_name}' (LFS alias: {lfs_url})\n")
     sys.stdout.flush()
 

@@ -352,6 +352,8 @@ git config lfs.customtransfer.git-lfs-s3.path git-lfs-s3
 
 The `lfs-alias.git-remote-s3.test` host is a synthetic, never-contacted match key (the `.test` TLD is reserved by RFC 6761 for non-resolvable use). It exists only because git-lfs's URL parser does not natively understand `s3://` URLs and would otherwise fall back to SSH-style endpoint discovery; setting `remote.<name>.lfsurl` short-circuits that path and gives the scoped agent lookup a stable URL to match against.
 
+`<bucket>` in that URL is the bucket component of the remote URL verbatim: when the remote uses a DNS bucket alias (e.g. `s3://demos.git.example.com/my-repo`), the alias — not the resolved bucket name — is written into the config, so re-pointing the alias at a different bucket never invalidates existing checkouts. Re-running `git-lfs-s3 install --remote <name>` migrates configs written by older versions that rendered the resolved bucket name.
+
 ### Creating the repo and pushing
 
 Let's assume we want to store TIFF file in LFS.
