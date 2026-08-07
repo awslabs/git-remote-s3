@@ -259,6 +259,14 @@ git config lfs.customtransfer.git-lfs-s3.path git-lfs-s3
 
 The `lfs-alias.git-remote-s3.test` host is a synthetic, never-contacted match key (the `.test` TLD is reserved by RFC 6761 for non-resolvable use). It exists only because git-lfs's URL parser does not natively understand `s3://` URLs and would otherwise fall back to SSH-style endpoint discovery; setting `remote.<name>.lfsurl` short-circuits that path and gives the scoped agent lookup a stable URL to match against.
 
+`lfs.customtransfer.git-lfs-s3.path` is necessarily repo-wide (git-lfs registers transfer adapters globally, not per URL), so `git-lfs-s3` is still listed in the `transfers` array of batch requests sent to other LFS servers. If a server rejects requests naming unknown adapters, set:
+
+```bash
+git config lfs.basictransfersonly true
+```
+
+which makes git-lfs omit the `transfers` array entirely. This setting is repo-wide and limits other remotes to basic HTTPS transfers; GitHub-style hosts already use these (even over SSH remotes), so only the rare server that speaks exclusively the pure-SSH LFS protocol is affected.
+
 ### Creating the repo and pushing
 
 Let's assume we want to store TIFF file in LFS.
