@@ -12,14 +12,33 @@ import os
 from .common import parse_git_url
 from .git import validate_ref_name
 
-if "lfs" in __name__:
-    logging.basicConfig(
-        level=logging.ERROR,
-        format="%(asctime)s - %(levelname)s - %(process)d - %(message)s",
-        filename=".git/lfs/tmp/git-lfs-s3.log",
-    )
-
 logger = logging.getLogger(__name__)
+
+
+def _resolve_git_dir() -> str:
+    """Returns the absolute path of the current git directory.
+
+    Returns:
+        str: absolute path to the gitdir; resolves submodule gitlink files.
+    """
+    return subprocess.check_output(
+        ["git", "rev-parse", "--absolute-git-dir"], text=True
+    ).strip()
+
+
+def _configure_logging() -> None:
+    """Configures the LFS agent's file logger under the resolved gitdir."""
+    log_format = "%(asctime)s - %(levelname)s - %(process)d - %(message)s"
+    try:
+        log_dir = os.path.join(_resolve_git_dir(), "lfs", "tmp")
+        os.makedirs(log_dir, exist_ok=True)
+        logging.basicConfig(
+            level=logging.ERROR,
+            format=log_format,
+            filename=os.path.join(log_dir, "git-lfs-s3.log"),
+        )
+    except (subprocess.CalledProcessError, OSError):
+        logging.basicConfig(level=logging.ERROR, format=log_format)
 
 
 class ProgressPercentage:
@@ -112,7 +131,8 @@ class LFSProcess:
         logger.debug("download")
         try:
             self.init_s3_bucket()
-            temp_dir = os.path.abspath(".git/lfs/tmp")
+            temp_dir = os.path.join(_resolve_git_dir(), "lfs", "tmp")
+            os.makedirs(temp_dir, exist_ok=True)
             self.s3_bucket.download_file(
                 Key=f"{self.prefix}/lfs/{event['oid']}",
                 Filename=f"{temp_dir}/{event['oid']}",
@@ -154,6 +174,7 @@ def install():
 
 
 def main():  # noqa: C901
+    _configure_logging()
     if len(sys.argv) > 1:
         if "install" == sys.argv[1]:
             install()
