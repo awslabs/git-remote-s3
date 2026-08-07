@@ -47,6 +47,29 @@ def test_synthetic_lfs_url_uses_reserved_tld():
     assert LFS_ALIAS_HOST.endswith(".test")
 
 
+@pytest.mark.parametrize(
+    "prefix,expected",
+    [
+        ("repo%zz", "repo%25zz"),
+        ("my repo", "my%20repo"),
+        ("re?po", "re%3Fpo"),
+        ("re#po", "re%23po"),
+    ],
+)
+def test_synthetic_lfs_url_percent_encodes_reserved_characters(prefix, expected):
+    assert (
+        synthetic_lfs_url("bucket", prefix)
+        == f"https://{LFS_ALIAS_HOST}/bucket/{expected}"
+    )
+
+
+def test_synthetic_lfs_url_encodes_segments_but_keeps_separators():
+    assert (
+        synthetic_lfs_url("bucket", "a/b c/d%e/repo.git-1_2")
+        == f"https://{LFS_ALIAS_HOST}/bucket/a/b%20c/d%25e/repo.git-1_2"
+    )
+
+
 def test_install_bare_one_remote_writes_unscoped_config(repo, capsys):
     _git(["git", "remote", "add", "origin", "s3://bucket/repo"], cwd=repo)
 
@@ -138,6 +161,30 @@ def test_install_remote_is_idempotent(repo):
         "git-lfs-s3"
     ]
     assert _git_config_get_all("lfs.customtransfer.git-lfs-s3.path", repo) == [
+        "git-lfs-s3"
+    ]
+
+
+def test_install_remote_reserved_chars_writes_encoded_config(repo):
+    """Re-running install never double-encodes: the alias is derived from the raw
+    remote URL each time, not from the previously written value."""
+    _git(["git", "remote", "add", "s3", "s3://bucket/deep dir/repo%zz"], cwd=repo)
+    expected_url = synthetic_lfs_url("bucket", "deep dir/repo%zz")
+    assert expected_url.endswith("/bucket/deep%20dir/repo%25zz")
+
+    lfs.install(remote_name="s3")
+
+    assert _git_config_get_all("remote.s3.lfsurl", repo) == [expected_url]
+    assert _git_config_get_all(f"lfs.{expected_url}.standalonetransferagent", repo) == [
+        "git-lfs-s3"
+    ]
+
+    lfs.install(remote_name="s3")
+
+    written = _git_config_get_all("remote.s3.lfsurl", repo)
+    assert written == [expected_url]
+    assert "%2525" not in written[0]
+    assert _git_config_get_all(f"lfs.{expected_url}.standalonetransferagent", repo) == [
         "git-lfs-s3"
     ]
 

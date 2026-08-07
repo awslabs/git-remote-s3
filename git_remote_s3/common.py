@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import re
+import urllib.parse
 
 from .enums import UriScheme
 
@@ -47,5 +48,12 @@ def synthetic_lfs_url(bucket: str, prefix: str) -> str:
     git-lfs's HTTPS-shaped endpoint resolution short-circuits its SSH-style
     discovery for ``s3://`` URLs. The hostname uses the RFC 6761-reserved
     ``.test`` TLD to guarantee non-collision with any real host.
+
+    Prefix segments are percent-encoded: an unencoded ``%`` (e.g. ``repo%zz``)
+    makes git-lfs resolve the endpoint as ``<unknown>``. Bucket names cannot
+    contain URL-reserved characters, so the bucket is left as-is.
     """
-    return f"https://{LFS_ALIAS_HOST}/{bucket}/{prefix}"
+    quoted_prefix = "/".join(
+        urllib.parse.quote(segment, safe="") for segment in prefix.split("/")
+    )
+    return f"https://{LFS_ALIAS_HOST}/{bucket}/{quoted_prefix}"

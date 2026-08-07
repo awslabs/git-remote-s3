@@ -218,6 +218,22 @@ def test_basictransfersonly_omits_transfers_from_non_s3_batch_request(
     assert len(batch_server.uploads) == 1
 
 
+def test_reserved_chars_in_prefix_still_select_the_standalone_agent(
+    lfs_repo, batch_server, push_env, tmp_path
+):
+    """git-lfs matches the scoped standalonetransferagent key against the endpoint
+    resolved from lfsurl, so both must carry the identical encoded URL."""
+    _git(
+        ["git", "remote", "add", "nasty", "s3://bucket/deep dir/repo%zz"], cwd=lfs_repo
+    )
+    lfs.install(remote_name="nasty")
+
+    _git(["git", "lfs", "push", "nasty", "main"], cwd=lfs_repo, env=push_env)
+
+    assert (tmp_path / "agent-invoked").exists()
+    assert batch_server.batch_requests == []
+
+
 def test_basictransfersonly_keeps_s3_remote_on_standalone_agent(
     lfs_repo, batch_server, push_env, tmp_path
 ):
