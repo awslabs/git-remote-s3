@@ -7,6 +7,7 @@ import tempfile
 import datetime
 import botocore
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 
 SHA1 = "c105d19ba64965d2c9d3d3246e7269059ef8bb8a"
@@ -669,6 +670,49 @@ def test_cmd_push_delete_fails_with_multiple_heads_s3_zip(session_client_mock):
 @patch("git_remote_s3.git.bundle")
 @patch("git_remote_s3.git.rev_parse")
 @patch("boto3.Session.client")
+def test_push_rejects_remote_created_after_initial_read(
+    session_client_mock, rev_parse_mock, bundle_mock, tmp_path
+):
+    s3_remote = S3Remote(UriScheme.S3, None, "test_bucket", "test_prefix")
+    remote_ref = f"refs/heads/{BRANCH}"
+    existing_bundle = {
+        "Key": f"test_prefix/{remote_ref}/{SHA1}.bundle",
+        "LastModified": datetime.datetime.now(),
+    }
+    bundle_file = tmp_path / f"{SHA2}.bundle"
+    bundle_file.write_bytes(MOCK_BUNDLE_CONTENT)
+
+    rev_parse_mock.return_value = SHA2
+    bundle_mock.return_value = str(bundle_file)
+
+    with (
+        patch.object(
+            s3_remote,
+            "get_bundles_for_ref",
+            side_effect=[[], [existing_bundle]],
+        ),
+        patch.object(
+            s3_remote,
+            "acquire_lock",
+            return_value=f"test_prefix/{remote_ref}/LOCK#.lock",
+        ),
+        patch.object(s3_remote, "release_lock") as release_lock_mock,
+    ):
+        result = s3_remote.cmd_push(f"push refs/heads/branch2:{remote_ref}")
+
+    assert "stale remote" in result
+    bundle_uploads = [
+        call
+        for call in session_client_mock.return_value.put_object.call_args_list
+        if call.kwargs.get("Key", "").endswith(".bundle")
+    ]
+    assert bundle_uploads == []
+    release_lock_mock.assert_called_once()
+
+
+@patch("git_remote_s3.git.bundle")
+@patch("git_remote_s3.git.rev_parse")
+@patch("boto3.Session.client")
 def test_simultaneous_pushes_single_bundle_remains(
     session_client_mock, rev_parse_mock, bundle_mock
 ):
@@ -677,20 +721,39 @@ def test_simultaneous_pushes_single_bundle_remains(
     storage = {}
     lock_keys = []
     storage_lock = threading.Lock()
+    initial_reads = threading.Barrier(2)
+    first_lock_released = threading.Event()
+    lock_attempts_lock = threading.Lock()
+    lock_attempts = 0
+    reads_by_thread = {}
 
     def list_objects_v2_side_effect(Bucket, Prefix, **kwargs):
+        wait_for_other_initial_read = False
         with storage_lock:
             if Prefix.endswith("/LOCKS/"):
                 contents = [{"Key": k, "LastModified": datetime.datetime.now()} for k in lock_keys]
             else:
+                thread_id = threading.get_ident()
+                reads_by_thread[thread_id] = reads_by_thread.get(thread_id, 0) + 1
+                wait_for_other_initial_read = reads_by_thread[thread_id] == 1
                 contents = [
                     {"Key": k, "LastModified": datetime.datetime.now()}
                     for k in storage.keys()
                     if k.startswith(Prefix)
                 ]
+        if wait_for_other_initial_read:
+            initial_reads.wait(timeout=5)
         return {"Contents": contents, "NextContinuationToken": None}
 
     def put_object_side_effect(Bucket, Key, Body=None, **kwargs):
+        nonlocal lock_attempts
+        if Key.endswith(".lock") and kwargs.get("IfNoneMatch") == "*":
+            with lock_attempts_lock:
+                lock_attempts += 1
+                lock_attempt = lock_attempts
+            if lock_attempt == 2:
+                assert first_lock_released.wait(timeout=5)
+
         with storage_lock:
             # Simulate S3 conditional writes for lock creation using If-None-Match
             if Key.endswith(".lock"):
@@ -712,12 +775,16 @@ def test_simultaneous_pushes_single_bundle_remains(
         return {}
 
     def delete_object_side_effect(Bucket, Key):
+        released_lock = False
         with storage_lock:
             storage.pop(Key, None)
             try:
                 lock_keys.remove(Key)
+                released_lock = True
             except ValueError:
                 pass
+        if released_lock:
+            first_lock_released.set()
         return {}
 
     session_client_mock.return_value.list_objects_v2.side_effect = list_objects_v2_side_effect
@@ -743,17 +810,16 @@ def test_simultaneous_pushes_single_bundle_remains(
 
     remote_ref = f"refs/heads/{BRANCH}"
 
-    t1 = threading.Thread(
-        target=s3_remote.cmd_push, args=(f"push refs/heads/branch1:{remote_ref}",)
-    )
-    t2 = threading.Thread(
-        target=s3_remote.cmd_push, args=(f"push refs/heads/branch2:{remote_ref}",)
-    )
-
-    t1.start()
-    t2.start()
-    t1.join()
-    t2.join()
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(
+                s3_remote.cmd_push, f"push refs/heads/branch1:{remote_ref}"
+            ),
+            executor.submit(
+                s3_remote.cmd_push, f"push refs/heads/branch2:{remote_ref}"
+            ),
+        ]
+        results = [future.result(timeout=10) for future in futures]
 
     with storage_lock:
         bundles = [
@@ -762,9 +828,12 @@ def test_simultaneous_pushes_single_bundle_remains(
             if k.startswith(f"test_prefix/{remote_ref}/") and k.endswith(".bundle")
         ]
 
-    # Only one push should succeed due to per-ref locking; the other will fail to acquire lock
+    # The second push acquires the lock after the first releases it, but must reject
+    # the stale pre-lock snapshot instead of leaving two bundles for the same ref.
     assert len(bundles) == 1
     assert bundles[0].endswith(f"/{SHA1}.bundle") or bundles[0].endswith(f"/{SHA2}.bundle")
+    assert sum(result.startswith("ok") for result in results) == 1
+    assert sum("stale remote" in result for result in results) == 1
 
 
 @patch("boto3.Session.client")

@@ -247,11 +247,7 @@ class S3Remote:
             current_remote_to_remove = (
                 current_contents[0]["Key"] if len(current_contents) == 1 else None
             )
-            if (
-                remote_to_remove is not None
-                and current_remote_to_remove is not None
-                and current_remote_to_remove != remote_to_remove
-            ):
+            if current_remote_to_remove != remote_to_remove:
                 return f'error {remote_ref} "stale remote. Please fetch and retry."?\n'
 
             with open(temp_file, "rb") as f:
