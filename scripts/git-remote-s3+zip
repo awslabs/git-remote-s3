@@ -1,0 +1,6 @@
+#!python
+from git_remote_s3.remote import main
+
+
+if __name__ == "__main__":
+    main()
