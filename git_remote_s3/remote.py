@@ -4,6 +4,7 @@
 
 import sys
 import logging
+import uuid
 import boto3
 import boto3.exceptions
 from botocore.exceptions import (
@@ -358,12 +359,15 @@ class S3Remote:
         """
 
         lock_key = f"{self.prefix}/{remote_ref}/LOCK#.lock"
+        # Unique per acquisition, so a 412 caused by boto3 retrying our own
+        # successful PUT can be told apart from another client's lock.
+        token = uuid.uuid4().hex.encode()
         try:
             # Use conditional write to create the lock only if it does not exist
             self.s3.put_object(
                 Bucket=self.bucket,
                 Key=lock_key,
-                Body=b"",
+                Body=token,
                 IfNoneMatch="*",
             )
             return lock_key
@@ -376,8 +380,15 @@ class S3Remote:
                     "412",
                 ]
             ):
-                # Check if the existing lock is stale; if so, try to clear and acquire
                 try:
+                    try:
+                        obj = self.s3.get_object(Bucket=self.bucket, Key=lock_key)
+                        if obj["Body"].read() == token:
+                            # boto3 retried our own PUT, which already succeeded.
+                            return lock_key
+                    except botocore.exceptions.ClientError:
+                        pass
+                    # Check if the existing lock is stale; if so, try to clear and acquire
                     head = self.s3.head_object(Bucket=self.bucket, Key=lock_key)
                     last_modified = head.get("LastModified")
                     if last_modified is not None:
@@ -386,13 +397,18 @@ class S3Remote:
                         now = datetime.datetime.now(tz=last_modified.tzinfo)
                         age = (now - last_modified).total_seconds()
                         if age > self.lock_ttl_seconds:
-                            # Attempt to delete stale lock and re-acquire
-                            self.s3.delete_object(Bucket=self.bucket, Key=lock_key)
+                            # Delete only the lock we observed, so a lock written
+                            # since by another client is not removed.
+                            self.s3.delete_object(
+                                Bucket=self.bucket,
+                                Key=lock_key,
+                                IfMatch=head["ETag"],
+                            )
                             # Retry conditional put
                             self.s3.put_object(
                                 Bucket=self.bucket,
                                 Key=lock_key,
-                                Body=b"",
+                                Body=token,
                                 IfNoneMatch="*",
                             )
                             return lock_key
