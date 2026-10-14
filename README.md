@@ -124,18 +124,20 @@ If you store multiple repos in a single bucket but would like to separate permis
         "Sid": "S3ListObjects",
         "Effect": "Allow",
         "Action": [
-          "s3:ListBucket",
+          "s3:ListBucket"
         ],
         "Condition": {
-          "StringEquals": {
-            "s3:prefix": "<REPO>"
+          "StringLike": {
+            "s3:prefix": ["<REPO>", "<REPO>/*"]
           }
         },
         "Resource": ["arn:aws:s3:::<BUCKET>"]
-      },
+      }
 ```
 
-Using the condition key restricts the access operation to the content of the specific repo in the bucket.
+Using the condition key restricts the access operation to the content of the specific repo in the bucket. Both values are needed: `git-remote-s3` lists the repo with the bare `<REPO>` prefix (e.g. `git ls-remote`, `git clone`) and with longer prefixes such as `<REPO>/refs/heads/main/` (e.g. on `git push`), so a `StringEquals` condition on `<REPO>` alone makes pushes fail with `AccessDenied`.
+
+Note that listing with the bare `<REPO>` prefix also returns the key names of any other repo whose name starts with the same string (e.g. `app` and `app-web`). Object contents remain protected by the `Resource` of the object actions, but if branch names are sensitive, avoid repo names that are a prefix of another repo name in the same bucket.
 
 ## Use S3 remotes
 
@@ -365,6 +367,21 @@ To remove remote branches that are not used anymore you can use the `git-s3 dele
 ### Protected branches
 
 To protect/unprotect a branch run `git s3 protect <remote> <branch-name>` respectively `git s3 unprotect <remote> <branch-name>`.
+
+Protection is enforced by the `git-remote-s3` client: it creates a `PROTECTED#` marker object under the branch, and the client refuses force pushes to branches that have one. Anyone with write access to the bucket can still bypass it, for example with another client or by deleting the marker. To enforce protection server side, add an IAM `Deny` to the policy of the users who must not push to the branch:
+
+```json
+      {
+        "Sid": "DenyPushToProtectedBranch",
+        "Effect": "Deny",
+        "Action": ["s3:PutObject", "s3:DeleteObject"],
+        "Resource": [
+          "arn:aws:s3:::<BUCKET>/<REPO>/refs/heads/<BRANCH>/*"
+        ]
+      }
+```
+
+With this statement those users can still clone, fetch and push other branches, but any push to `<BRANCH>` (including its lock and protection marker objects) fails with `AccessDenied`.
 
 ## Under the hood
 
