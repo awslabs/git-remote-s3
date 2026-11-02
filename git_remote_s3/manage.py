@@ -101,12 +101,15 @@ class Doctor:
         repos = {}
         for o in objs:
             key = o["Key"]
-            key_parts = key.split("/")
-            repo_name = key_parts[0]
+            # The remote prefix can contain several path segments
+            # (e.g. s3://bucket/team/repo), so strip it instead of assuming
+            # that the first segment of the key is the repository name.
+            repo_name = self.prefix
+            key_parts = key[len(self.prefix) + 1 :].split("/")
             if repo_name not in repos:
                 repos[repo_name] = {"refs": {}, "HEAD": "Missing"}
-            refs = "/".join(key_parts[1:-1])
-            if key_parts[1] == "HEAD":
+            refs = "/".join(key_parts[:-1])
+            if key_parts[0] == "HEAD":
                 head_ref = (
                     self.s3.get_object(Bucket=self.bucket, Key=key)
                     .get("Body")
