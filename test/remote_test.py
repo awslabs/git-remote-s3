@@ -864,7 +864,10 @@ def test_acquire_lock_deletes_stale_and_reacquires(session_client_mock):
 
     # Stale lock: last_modified far in the past
     def head_object_side_effect(Bucket, Key):
-        return {"LastModified": datetime.datetime.now() - datetime.timedelta(seconds=120)}
+        return {
+            "LastModified": datetime.datetime.now() - datetime.timedelta(seconds=120),
+            "ETag": '"stale-etag"',
+        }
 
     session_client_mock.return_value.put_object.side_effect = put_object_side_effect
     session_client_mock.return_value.head_object.side_effect = head_object_side_effect
@@ -884,9 +887,97 @@ def test_acquire_lock_deletes_stale_and_reacquires(session_client_mock):
         c for c in session_client_mock.return_value.delete_object.call_args_list if c.kwargs["Key"].endswith(".lock")
     ]
     assert len(delete_calls) == 1
+    assert delete_calls[0].kwargs["IfMatch"] == '"stale-etag"'
 
     # Verify put was attempted at least twice (initial fail + reacquire)
     put_lock_calls = [
         c for c in session_client_mock.return_value.put_object.call_args_list if c.kwargs.get("Key", "").endswith(".lock")
     ]
     assert len(put_lock_calls) >= 2
+
+
+@patch("boto3.Session.client")
+def test_acquire_lock_claims_own_lock_after_boto3_retry_after_success(session_client_mock):
+    """A boto3 retry of a PUT that already succeeded gets 412. The lock body
+    is our token, so we already hold the lock and must not delete it."""
+    s3_remote = S3Remote(UriScheme.S3, None, "test_bucket", "test_prefix")
+    remote_ref = f"refs/heads/{BRANCH}"
+    lock_key = f"test_prefix/{remote_ref}/LOCK#.lock"
+
+    written = {}
+
+    def put_object_side_effect(Bucket, Key, Body=None, **kwargs):
+        written[Key] = Body
+        raise botocore.exceptions.ClientError(
+            {
+                "ResponseMetadata": {"HTTPStatusCode": 412},
+                "Error": {"Code": "PreconditionFailed"},
+            },
+            "put_object",
+        )
+
+    session_client_mock.return_value.put_object.side_effect = put_object_side_effect
+    session_client_mock.return_value.get_object.side_effect = lambda Bucket, Key, **kwargs: {
+        "Body": BytesIO(written[Key])
+    }
+
+    assert s3_remote.acquire_lock(remote_ref) == lock_key
+    assert session_client_mock.return_value.put_object.call_count == 1
+    session_client_mock.return_value.delete_object.assert_not_called()
+
+
+@patch("boto3.Session.client")
+def test_acquire_lock_does_not_claim_foreign_lock(session_client_mock):
+    """A live lock written by another acquisition has a different token."""
+    s3_remote = S3Remote(UriScheme.S3, None, "test_bucket", "test_prefix")
+    remote_ref = f"refs/heads/{BRANCH}"
+
+    session_client_mock.return_value.put_object.side_effect = botocore.exceptions.ClientError(
+        {
+            "ResponseMetadata": {"HTTPStatusCode": 412},
+            "Error": {"Code": "PreconditionFailed"},
+        },
+        "put_object",
+    )
+    session_client_mock.return_value.get_object.return_value = {"Body": BytesIO(b"someone-else")}
+    session_client_mock.return_value.head_object.return_value = {
+        "LastModified": datetime.datetime.now(datetime.timezone.utc)
+    }
+
+    try:
+        s3_remote.acquire_lock(remote_ref)
+        assert False, "expected PreconditionFailed"
+    except botocore.exceptions.ClientError:
+        pass
+    session_client_mock.return_value.delete_object.assert_not_called()
+
+
+@patch("boto3.Session.client")
+def test_acquire_lock_does_not_take_stale_lock_replaced_by_another_client(session_client_mock):
+    """If another client replaced the stale lock after we read it, the
+    conditional delete fails and we do not reacquire."""
+    s3_remote = S3Remote(UriScheme.S3, None, "test_bucket", "test_prefix")
+    s3_remote.lock_ttl_seconds = 60
+    remote_ref = f"refs/heads/{BRANCH}"
+
+    precondition_failed = botocore.exceptions.ClientError(
+        {
+            "ResponseMetadata": {"HTTPStatusCode": 412},
+            "Error": {"Code": "PreconditionFailed"},
+        },
+        "put_object",
+    )
+    session_client_mock.return_value.put_object.side_effect = precondition_failed
+    session_client_mock.return_value.delete_object.side_effect = precondition_failed
+    session_client_mock.return_value.get_object.return_value = {"Body": BytesIO(b"someone-else")}
+    session_client_mock.return_value.head_object.return_value = {
+        "LastModified": datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=120),
+        "ETag": '"stale-etag"',
+    }
+
+    try:
+        s3_remote.acquire_lock(remote_ref)
+        assert False, "expected PreconditionFailed"
+    except botocore.exceptions.ClientError:
+        pass
+    assert session_client_mock.return_value.put_object.call_count == 1
